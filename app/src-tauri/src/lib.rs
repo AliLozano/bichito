@@ -45,6 +45,10 @@ fn finish_onboarding(app: tauri::AppHandle) {
 }
 
 pub fn run() {
+    // Select a rustls crypto provider up front — required for wss:// (TLS) in the
+    // release build; without it rustls panics on the first secure connection.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         // Launch-at-login: LaunchAgent on macOS, Run-key on Windows.
