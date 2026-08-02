@@ -36,7 +36,7 @@ fn server_url() -> String {
         if cfg!(debug_assertions) {
             "ws://127.0.0.1:8787/ws".to_string()
         } else {
-            "wss://ws.pet.alilozano.com/ws".to_string()
+            "wss://ws-pet.alilozano.com/ws".to_string()
         }
     })
 }
