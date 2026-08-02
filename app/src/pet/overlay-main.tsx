@@ -60,6 +60,17 @@ function Overlay() {
       ),
       listen<{ target: string }>("leap", (e) => sim.leap(e.payload.target)),
       listen<WorldConfig>("config", (e) => sim.setConfig(e.payload)),
+      // live profile change (new name/character) -> update my pet immediately
+      listen<Profile>("profile-changed", (e) => {
+        const p = e.payload;
+        setMe(p);
+        sim.setMe(p.id, p.name, p.character);
+        const mine = sim.pets.get(sim.me);
+        if (mine) {
+          mine.character = p.character;
+          mine.name = p.name;
+        }
+      }),
     ];
 
     // --- main loop ----------------------------------------------------------
