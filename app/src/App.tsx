@@ -121,7 +121,7 @@ export function App() {
       </div>
 
       <button
-        onClick={() => getCurrentWindow().hide()}
+        onClick={() => invoke("hide_main")}
         className="mt-auto py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-sm transition"
       >
         Cerrar (sigo viviendo en la barra)

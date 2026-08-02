@@ -10,12 +10,39 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 
-// Show the main (settings) window, focused.
+// macOS: toggle whether the app appears in the Dock / Cmd+Tab. Accessory = hidden
+// (tray-only, the default for bichito); Regular = normal, used briefly while a
+// settings window is open so it can come to the front. No-op on other platforms.
+fn set_dock(app: &tauri::AppHandle, visible: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.set_activation_policy(if visible {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, visible);
+}
+
+// Show the main (settings) window, focused. Briefly become a Regular app so the
+// window comes to the front and is interactable.
 fn show_main(app: &tauri::AppHandle) {
+    set_dock(app, true);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+// Hide the settings window and go back to tray-only (out of Cmd+Tab / Dock).
+#[tauri::command]
+fn hide_main(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    set_dock(&app, false);
 }
 
 // Make the overlay cover the primary monitor's WORK AREA (visible frame, excluding
@@ -41,6 +68,8 @@ fn finish_onboarding(app: tauri::AppHandle) {
     }
     // Run at login by default (the user can turn it off in Preferencias).
     let _ = app.autolaunch().enable();
+    // Onboarding done -> live in the tray only (out of Cmd+Tab / Dock).
+    set_dock(&app, false);
     presence::start(&app);
 }
 
@@ -60,6 +89,7 @@ pub fn run() {
         .manage(cursor::GrabState::default())
         .invoke_handler(tauri::generate_handler![
             finish_onboarding,
+            hide_main,
             cursor::cursor_poll_start,
             cursor::set_clickthrough,
             presence::get_online,
@@ -118,10 +148,12 @@ pub fn run() {
                 .exists();
                 if already {
                     arm_overlay(&overlay);
-                    // Onboarding already done -> don't pop the main window on launch.
+                    // Onboarding already done -> don't pop the main window on launch,
+                    // and live in the tray only (out of Cmd+Tab / Dock).
                     if let Some(main) = app.get_webview_window("main") {
                         let _ = main.hide();
                     }
+                    set_dock(app.handle(), false);
                 }
             }
 
