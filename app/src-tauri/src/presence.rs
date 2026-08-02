@@ -248,13 +248,23 @@ async fn run(
                     .send(Message::Text(serde_json::to_string(&hello).unwrap()))
                     .await;
 
+                // Keepalive ping: holds the connection open through Cloudflare's ~100s
+                // idle timeout, and surfaces a dead link fast (a failed send -> break ->
+                // reconnect) if the network drops without a clean close.
+                let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+                keepalive.tick().await; // consume the immediate first tick
+
                 loop {
                     tokio::select! {
                         cmd = rx.recv() => match cmd {
                             Some(c) => {
-                                let _ = write
+                                if write
                                     .send(Message::Text(serde_json::to_string(&c).unwrap()))
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    break; // link is dead -> reconnect
+                                }
                             }
                             None => return, // app shutting down
                         },
@@ -264,6 +274,11 @@ async fn run(
                             Some(Err(_)) => break,
                             Some(Ok(_)) => {} // ping/pong/binary — ignore
                         },
+                        _ = keepalive.tick() => {
+                            if write.send(Message::Ping(Vec::new())).await.is_err() {
+                                break; // reconnect
+                            }
+                        }
                         // periodically re-check DND so toggling it disconnects promptly
                         _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                             if app.state::<PresenceState>().dnd.load(Ordering::Relaxed) {

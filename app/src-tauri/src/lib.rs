@@ -8,6 +8,7 @@ use tauri::{
     tray::{TrayIconBuilder, TrayIconEvent},
     Manager, WebviewWindow,
 };
+use tauri_plugin_autostart::ManagerExt;
 
 // Show the main (settings) window, focused.
 fn show_main(app: &tauri::AppHandle) {
@@ -38,12 +39,19 @@ fn finish_onboarding(app: tauri::AppHandle) {
     if let Some(overlay) = app.get_webview_window("overlay") {
         arm_overlay(&overlay);
     }
+    // Run at login by default (the user can turn it off in Preferencias).
+    let _ = app.autolaunch().enable();
     presence::start(&app);
 }
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
+        // Launch-at-login: LaunchAgent on macOS, Run-key on Windows.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(PresenceState::default())
         .manage(cursor::GrabState::default())
         .invoke_handler(tauri::generate_handler![

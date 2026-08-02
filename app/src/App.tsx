@@ -2,11 +2,49 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emitTo } from "@tauri-apps/api/event";
+import { isEnabled, enable, disable } from "@tauri-apps/plugin-autostart";
 import { Onboarding } from "./windows/Onboarding";
 import { ConfigPanel } from "./windows/ConfigPanel";
 import { Character } from "./components/Character";
 import { loadProfile, saveProfile, type Profile } from "./lib/store";
 import { getCharacter, type CharacterId } from "./lib/characters";
+
+// Local (per-device) toggle: launch bichito at login. Enabled by default after
+// onboarding; this lets the user turn it off. Works on macOS + Windows.
+function AutostartToggle() {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    isEnabled().then(setOn).catch(() => {});
+  }, []);
+  const toggle = async () => {
+    try {
+      if (on) await disable();
+      else await enable();
+      setOn(!on);
+    } catch {
+      /* ignore */
+    }
+  };
+  return (
+    <button
+      onClick={toggle}
+      className="flex items-center justify-between gap-3 w-full text-sm py-1"
+    >
+      <span>Abrir al iniciar la computadora</span>
+      <span
+        className={`w-11 h-6 rounded-full relative transition ${
+          on ? "bg-bichito-accent" : "bg-white/15"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${
+            on ? "left-[22px]" : "left-0.5"
+          }`}
+        />
+      </span>
+    </button>
+  );
+}
 
 export function App() {
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -76,6 +114,10 @@ export function App() {
 
       <div className="border-t border-white/10 pt-4">
         <ConfigPanel />
+      </div>
+
+      <div className="border-t border-white/10 pt-4">
+        <AutostartToggle />
       </div>
 
       <button

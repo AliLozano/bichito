@@ -20,6 +20,7 @@
     "core:window:allow-set-ignore-cursor-events",
     "core:window:allow-primary-monitor",
     "core:window:allow-current-monitor",
-    "store:default"
+    "store:default",
+    "autostart:default"
   ]
 }

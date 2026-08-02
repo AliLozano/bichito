@@ -75,6 +75,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         handle_msg(&state, &mut my_id, &tx, msg);
                     }
                 }
+                Some(Ok(Message::Ping(p))) => {
+                    let _ = tx.send(Message::Pong(p)); // keepalive
+                }
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Err(_)) => break,
                 Some(Ok(_)) => {}
