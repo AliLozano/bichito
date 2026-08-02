@@ -32,17 +32,22 @@ fn arm_overlay(win: &WebviewWindow) {
     let _ = win.show();
 }
 
-/// Debug logger: appends a line to /tmp/bichito-battle.log (for tuning the grip battle).
+/// Debug logger for tuning the grip battle. No-op in release builds (dev only).
 #[tauri::command]
 fn dbg_log(line: String) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/bichito-battle.log")
+    #[cfg(debug_assertions)]
     {
-        let _ = writeln!(f, "{line}");
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/bichito-battle.log")
+        {
+            let _ = writeln!(f, "{line}");
+        }
     }
+    #[cfg(not(debug_assertions))]
+    let _ = line;
 }
 
 #[tauri::command]

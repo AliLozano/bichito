@@ -58,7 +58,7 @@ BICHITO_SERVER=ws://192.168.1.50:8787/ws npm run tauri dev
 
 (Ambas en la misma red; abre el puerto 8787 en el firewall del Mac si hace falta.)
 Después del **Hito 4**, ya no hace falta nada de esto: el build release apunta solo a
-`wss://ws.bichito.creavity.io/ws` y cualquiera con el instalador se conecta.
+`wss://ws.pet.alilozano.com/ws` y cualquiera con el instalador se conecta.
 
 ## 3) Tests del protocolo (headless, sin GUI)
 
