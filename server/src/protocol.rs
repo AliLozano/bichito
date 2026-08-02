@@ -13,6 +13,18 @@ pub struct UserInfo {
     pub character: String,
 }
 
+/// Shared "vibe" config for the whole friend group. The first client to connect
+/// seeds it (via Hello); everyone then adopts it and stays in sync. Anyone can
+/// update it later (Config message) and it re-broadcasts to all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldConfig {
+    pub walk_time: f64,  // seconds wandering before getting sleepy
+    pub sleep_time: f64, // seconds asleep at the edge
+    pub jump_every: f64, // avg seconds between random leaps (0 = never)
+    pub run_speed: f64,  // flee/leap run speed (normalized/s)
+}
+
 /// One pet's authoritative snapshot. `state`: walk | held | thrown | oncursor |
 /// flee | gone. `target` = whose cursor it's on (for `oncursor`), else "".
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +52,13 @@ pub enum ClientMsg {
         id: String,
         name: String,
         character: String,
+        /// this client's local config — seeds the shared one if none exists yet
+        #[serde(default)]
+        config: Option<WorldConfig>,
+    },
+    /// Update the shared group config (re-broadcast to everyone).
+    Config {
+        config: WorldConfig,
     },
     /// Take control of the pet owned by `owner` (on grab/leap).
     Claim {
@@ -67,6 +86,8 @@ pub enum ClientMsg {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerMsg {
     Presence { users: Vec<UserInfo> },
+    /// The current shared group config (sent on join, and on any change).
+    Config { config: WorldConfig },
     /// Full world (all pets' latest snapshots) — sent on join / big changes.
     World { pets: Vec<PetSnap> },
     PeerClaim { owner: String, controller: String },

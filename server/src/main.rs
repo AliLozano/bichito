@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 mod protocol;
-use protocol::{ClientMsg, PetSnap, ServerMsg, UserInfo};
+use protocol::{ClientMsg, PetSnap, ServerMsg, UserInfo, WorldConfig};
 
 struct Peer {
     name: String,
@@ -30,6 +30,7 @@ type Pets = Arc<Mutex<HashMap<String, PetSnap>>>; // owner -> latest snapshot
 struct AppState {
     reg: Registry,
     pets: Pets,
+    config: Arc<Mutex<Option<WorldConfig>>>, // shared group config (first client seeds it)
 }
 
 #[tokio::main]
@@ -37,6 +38,7 @@ async fn main() {
     let state = AppState {
         reg: Arc::new(DashMap::new()),
         pets: Arc::new(Mutex::new(HashMap::new())),
+        config: Arc::new(Mutex::new(None)),
     };
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -113,12 +115,24 @@ fn handle_msg(
     msg: ClientMsg,
 ) {
     match msg {
-        ClientMsg::Hello { id, name, character } => {
+        ClientMsg::Hello { id, name, character, config } => {
             state.reg.insert(
                 id.clone(),
                 Peer { name: name.clone(), character: character.clone(), tx: tx.clone() },
             );
             *my_id = Some(id.clone());
+            // first client to connect seeds the shared config; everyone adopts it
+            {
+                let mut cfg = state.config.lock().unwrap();
+                if cfg.is_none() {
+                    if let Some(c) = config {
+                        *cfg = Some(c);
+                    }
+                }
+                if let Some(c) = cfg.clone() {
+                    let _ = tx.send(frame(&ServerMsg::Config { config: c }));
+                }
+            }
             // spawn this user's pet (they control it), walking in from an edge
             let from_left = (nanos() & 1) == 0;
             state.pets.lock().unwrap().entry(id.clone()).or_insert(PetSnap {
@@ -138,6 +152,10 @@ fn handle_msg(
             });
             broadcast_presence(&state.reg);
             broadcast_world(state);
+        }
+        ClientMsg::Config { config } => {
+            *state.config.lock().unwrap() = Some(config.clone());
+            broadcast(state, &ServerMsg::Config { config });
         }
         ClientMsg::Claim { owner } => {
             let Some(me) = my_id.clone() else { return };

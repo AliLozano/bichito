@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emitTo } from "@tauri-apps/api/event";
 import { Onboarding } from "./windows/Onboarding";
+import { ConfigPanel } from "./windows/ConfigPanel";
 import { Character } from "./components/Character";
 import { loadProfile, saveProfile, type Profile } from "./lib/store";
 import { getCharacter, type CharacterId } from "./lib/characters";
@@ -71,6 +72,10 @@ export function App() {
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="border-t border-white/10 pt-4">
+        <ConfigPanel />
       </div>
 
       <button

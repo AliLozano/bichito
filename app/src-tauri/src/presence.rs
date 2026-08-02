@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
 };
 
@@ -11,7 +11,7 @@ use tauri::{
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::protocol::{ClientMsg, PetSnap, ServerMsg, UserInfo};
+use crate::protocol::{ClientMsg, PetSnap, ServerMsg, UserInfo, WorldConfig};
 use tauri_plugin_store::StoreExt;
 
 /// App-global presence state, managed via `app.manage(...)`.
@@ -23,10 +23,17 @@ pub struct PresenceState {
     pub me: Mutex<Option<String>>,
     /// Latest online snapshot from the server.
     pub online: Mutex<Vec<UserInfo>>,
+    /// Latest shared group config (overlay/settings fetch it on load).
+    pub config: Mutex<Option<WorldConfig>>,
     /// Latest full world (so the overlay can fetch it on load).
     pub world: Mutex<Vec<PetSnap>>,
     /// Whether the WS is currently connected.
     pub connected: AtomicBool,
+    /// Do Not Disturb: while true we stay offline and the overlay is hidden.
+    pub dnd: AtomicBool,
+    /// Bumped each time DND is toggled, so a stale 30-min timer can't un-DND a
+    /// freshly re-enabled session.
+    dnd_gen: AtomicU64,
     /// Guards against starting the task twice.
     started: AtomicBool,
 }
@@ -60,6 +67,13 @@ fn read_profile(app: &AppHandle) -> Option<(String, String, String)> {
         .unwrap_or("gato")
         .to_string();
     Some((id, name, character))
+}
+
+/// Read the persisted local config (written by the JS store plugin), if any.
+fn read_config(app: &AppHandle) -> Option<WorldConfig> {
+    let store = app.store("bichito.json").ok()?;
+    let c = store.get("config")?;
+    serde_json::from_value(c).ok()
 }
 
 /// Start the presence client (idempotent). Called once the user is onboarded.
@@ -161,6 +175,50 @@ pub fn net_bump(app: AppHandle, owner: String, vx: f64, vy: f64) {
     send(&app, ClientMsg::Bump { owner, vx, vy });
 }
 
+/// The current shared group config (settings/overlay fetch it on load).
+#[tauri::command]
+pub fn get_config(app: AppHandle) -> Option<WorldConfig> {
+    app.state::<PresenceState>().config.lock().unwrap().clone()
+}
+
+/// Update the shared group config -> broadcast to everyone (the echo updates us).
+#[tauri::command]
+pub fn net_config(app: AppHandle, config: WorldConfig) {
+    *app.state::<PresenceState>().config.lock().unwrap() = Some(config.clone());
+    send(&app, ClientMsg::Config { config });
+}
+
+/// Whether Do Not Disturb is currently on.
+#[tauri::command]
+pub fn get_dnd(app: AppHandle) -> bool {
+    app.state::<PresenceState>().dnd.load(Ordering::Relaxed)
+}
+
+/// Toggle Do Not Disturb. On -> go offline + hide the overlay for 30 min (auto-off).
+#[tauri::command]
+pub fn set_dnd(app: AppHandle, on: bool) {
+    let state = app.state::<PresenceState>();
+    state.dnd.store(on, Ordering::Relaxed);
+    let gen = state.dnd_gen.fetch_add(1, Ordering::SeqCst) + 1;
+
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = if on { win.hide() } else { win.show() };
+    }
+    rebuild_tray(&app);
+
+    if on {
+        // auto-clear after 30 minutes, unless DND was toggled again since
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+            let st = app2.state::<PresenceState>();
+            if st.dnd_gen.load(Ordering::SeqCst) == gen && st.dnd.load(Ordering::Relaxed) {
+                set_dnd(app2.clone(), false);
+            }
+        });
+    }
+}
+
 /// Long-lived task: connect, announce, pump messages, reconnect on drop.
 async fn run(
     app: AppHandle,
@@ -171,6 +229,10 @@ async fn run(
 ) {
     let url = server_url();
     loop {
+        // While Do Not Disturb is on, stay offline entirely.
+        while app.state::<PresenceState>().dnd.load(Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
                 set_connected(&app, true);
@@ -180,6 +242,7 @@ async fn run(
                     id: id.clone(),
                     name: name.clone(),
                     character: character.clone(),
+                    config: read_config(&app), // seeds the shared config if we're first
                 };
                 let _ = write
                     .send(Message::Text(serde_json::to_string(&hello).unwrap()))
@@ -201,6 +264,12 @@ async fn run(
                             Some(Err(_)) => break,
                             Some(Ok(_)) => {} // ping/pong/binary — ignore
                         },
+                        // periodically re-check DND so toggling it disconnects promptly
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                            if app.state::<PresenceState>().dnd.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
                     }
                 }
                 set_connected(&app, false);
@@ -220,6 +289,11 @@ fn handle_server(app: &AppHandle, text: &str) {
             *app.state::<PresenceState>().online.lock().unwrap() = users.clone();
             rebuild_tray(app);
             let _ = app.emit("presence", users);
+        }
+        ServerMsg::Config { config } => {
+            *app.state::<PresenceState>().config.lock().unwrap() = Some(config.clone());
+            let _ = app.emit_to("overlay", "config", config.clone());
+            let _ = app.emit("config", config); // settings window
         }
         ServerMsg::World { pets } => {
             *app.state::<PresenceState>().world.lock().unwrap() = pets.clone();
@@ -261,8 +335,13 @@ fn set_connected(app: &AppHandle, connected: bool) {
     rebuild_tray(app);
 }
 
-/// A `send:<id>` tray click -> tell the overlay to leap MY pet onto that friend.
+/// Handle tray items owned by presence: `send:<id>` (leap) and `dnd` (toggle DND).
 pub fn handle_menu(app: &AppHandle, menu_id: &str) -> bool {
+    if menu_id == "dnd" {
+        let on = app.state::<PresenceState>().dnd.load(Ordering::Relaxed);
+        set_dnd(app.clone(), !on);
+        return true;
+    }
     let Some(to) = menu_id.strip_prefix("send:") else {
         return false;
     };
@@ -285,9 +364,12 @@ fn rebuild_tray_inner(app: &AppHandle) -> tauri::Result<()> {
     let state = app.state::<PresenceState>();
     let me = state.me.lock().unwrap().clone();
     let connected = state.connected.load(Ordering::Relaxed);
+    let dnd_on = state.dnd.load(Ordering::Relaxed);
     let online = state.online.lock().unwrap().clone();
 
-    let header_text = if connected {
+    let header_text = if dnd_on {
+        "🌙 No molestar"
+    } else if connected {
         "🟢 En línea"
     } else {
         "🔴 Reconectando…"
@@ -326,9 +408,16 @@ fn rebuild_tray_inner(app: &AppHandle) -> tauri::Result<()> {
     }
 
     let sep2 = PredefinedMenuItem::separator(app)?;
+    let dnd_label = if dnd_on {
+        "🌙 No molestar (activo) — volver"
+    } else {
+        "🌙 No molestar (30 min)"
+    };
+    let dnd = MenuItem::with_id(app, "dnd", dnd_label, true, None::<&str>)?;
     let prefs = MenuItem::with_id(app, "prefs", "Preferencias", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
     items.push(&sep2);
+    items.push(&dnd);
     items.push(&prefs);
     items.push(&quit);
 

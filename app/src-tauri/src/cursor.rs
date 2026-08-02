@@ -23,11 +23,18 @@ pub fn cursor_poll_start(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             if let Some(win) = app.get_webview_window("overlay") {
-                if let (Ok(pos), Ok(Some(mon))) = (win.cursor_position(), win.primary_monitor()) {
-                    let sz = mon.size();
-                    if sz.width > 0 && sz.height > 0 {
-                        let nx = pos.x / sz.width as f64;
-                        let ny = pos.y / sz.height as f64;
+                // Normalize the cursor against the overlay window's CONTENT rect, not
+                // the monitor — otherwise the macOS menu bar (or any window offset)
+                // shifts the cursor vs. where the webview renders pets, and clicks
+                // land off. This matches the render basis exactly on Win/Mac.
+                if let (Ok(pos), Ok(ipos), Ok(isz)) =
+                    (win.cursor_position(), win.inner_position(), win.inner_size())
+                {
+                    let iw = isz.width as f64;
+                    let ih = isz.height as f64;
+                    if iw > 0.0 && ih > 0.0 {
+                        let nx = (pos.x - ipos.x as f64) / iw;
+                        let ny = (pos.y - ipos.y as f64) / ih;
                         let _ = app.emit_to(
                             "overlay",
                             "local-cursor",

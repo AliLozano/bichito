@@ -11,6 +11,16 @@ pub struct UserInfo {
     pub character: String,
 }
 
+/// Shared group "vibe" config (mirror of server). First client seeds it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldConfig {
+    pub walk_time: f64,
+    pub sleep_time: f64,
+    pub jump_every: f64,
+    pub run_speed: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PetSnap {
@@ -36,7 +46,11 @@ pub enum ClientMsg {
         id: String,
         name: String,
         character: String,
+        #[serde(default)]
+        config: Option<WorldConfig>,
     },
+    /// Update the shared group config (re-broadcast to everyone).
+    Config { config: WorldConfig },
     /// Take control of the pet owned by `owner` (on grab/leap).
     Claim { owner: String },
     /// Broadcast a pet snapshot (I'm its controller).
@@ -51,6 +65,7 @@ pub enum ClientMsg {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerMsg {
     Presence { users: Vec<UserInfo> },
+    Config { config: WorldConfig },
     World { pets: Vec<PetSnap> },
     PeerClaim { owner: String, controller: String },
     PeerSnap { snap: PetSnap },

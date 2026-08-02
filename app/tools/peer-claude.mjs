@@ -9,9 +9,12 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 const URL = process.env.BICHITO_SERVER || "ws://127.0.0.1:8787/ws";
 const CMD_FILE = process.env.CMD_FILE || "/tmp/claude_cmd";
 const ME = { id: "claude-peer", name: process.env.PEER_NAME || "Claude", character: "fantasma" };
+const config = { walkTime: 25, sleepTime: 25, jumpEvery: 3600, runSpeed: 0.26 };
 
 // physics (mirrors sim.ts)
-const G = 2.6, FLOOR = 0.9, WALK = 0.05, RUN = 0.26, PET_R = 0.03;
+const G = 2.6, WALK = 0.05, RUN = 0.26, PET_R = 0.03;
+const CW = 1920, CH = 1080, COLLIDE_R = 56 * 0.45; // assumed screen (headless) for px collision
+const FLOOR = 1 - (56 * 0.7) / CH; // sprite bottom sits 0.2*sprite above the (assumed) screen bottom
 const SNAP_MS = 45, CURSOR_MS = 45, MAX_THROW = 1.6;
 const rand = (a, b) => a + Math.random() * (b - a);
 const now = () => Date.now();
@@ -44,6 +47,13 @@ function tickCursor() {
   if (hideAt && now() >= hideAt) { cursorShown = false; hideAt = 0; }
 }
 
+// deterministic sleeping slot so pets lie side by side (ranked by owner id)
+function sleepX(p) {
+  const owners = [...pets.keys()].sort();
+  const rank = Math.max(0, owners.indexOf(p.owner));
+  return 0.05 + rank * 0.055;
+}
+
 function blank(owner, name, character, controller) {
   return {
     owner, name, character, controller, state: "walk",
@@ -68,12 +78,13 @@ function applySnap(s) {
   }
 }
 
-ws.on("open", () => { log(`[claude] conectado a ${URL}`); send({ type: "hello", ...ME }); });
+ws.on("open", () => { log(`[claude] conectado a ${URL}`); send({ type: "hello", ...ME, config }); });
 
 ws.on("message", (buf) => {
   let m; try { m = JSON.parse(buf.toString()); } catch { return; }
   switch (m.type) {
     case "presence": break;
+    case "config": Object.assign(config, m.config); break;
     case "world": {
       for (const s of m.pets) applySnap(s);
       const present = new Set(m.pets.map((s) => s.owner));
@@ -91,10 +102,17 @@ function simulate(p, dt) {
   p.t += dt;
   switch (p.state) {
     case "walk": {
-      const dir = p.wanderNext > p.x ? 1 : -1;
+      const sleepy = p.t > config.walkTime;
+      const goal = sleepy ? sleepX(p) : p.wanderNext;
+      const dir = goal > p.x ? 1 : -1;
       p.x += dir * WALK * dt; p.flip = dir < 0; p.y = FLOOR;
       p.frameAcc += dt; if (p.frameAcc > 0.12) { p.frameAcc = 0; p.frame ^= 1; }
-      if (Math.abs(p.x - p.wanderNext) < 0.02) { p.wanderNext = rand(0.1, 0.9); p.t = 0; }
+      if (Math.abs(p.x - goal) < 0.02) { if (sleepy) { p.state = "sleeping"; p.t = 0; } else p.wanderNext = rand(0.1, 0.9); }
+      break;
+    }
+    case "sleeping": {
+      p.y = FLOOR; p.frameAcc += dt; if (p.frameAcc > 0.6) { p.frameAcc = 0; p.frame ^= 1; }
+      if (p.t > config.sleepTime) { p.state = "walk"; p.wanderNext = rand(0.1, 0.9); p.t = 0; }
       break;
     }
     case "held": {
@@ -132,7 +150,7 @@ function simulate(p, dt) {
       p.frameAcc += dt; if (p.frameAcc > 0.06) { p.frameAcc = 0; p.frame ^= 1; }
       const edge = c.x < 0.5 ? 0.03 : 0.97;
       if (p.lphase === "run") {
-        p.y = FLOOR; const dir = edge > p.x ? 1 : -1; p.vx = dir * RUN * 1.7; p.vy = 0; p.x += p.vx * dt; p.flip = dir < 0;
+        p.y = FLOOR; const dir = edge > p.x ? 1 : -1; p.vx = dir * config.runSpeed * 1.7; p.vy = 0; p.x += p.vx * dt; p.flip = dir < 0;
         if (Math.abs(p.x - edge) < 0.03) { p.x = edge; p.lphase = "climb"; }
       } else if (p.lphase === "climb") {
         p.x = edge; p.vx = 0; p.vy = 0; p.flip = edge > 0.5;
@@ -168,7 +186,7 @@ function simulate(p, dt) {
     }
     case "flee": {
       const dir = p.wanderNext > p.x ? 1 : -1;
-      p.x += dir * RUN * dt; p.flip = dir < 0; p.y = FLOOR;
+      p.x += dir * config.runSpeed * dt; p.flip = dir < 0; p.y = FLOOR;
       p.frameAcc += dt; if (p.frameAcc > 0.08) { p.frameAcc = 0; p.frame ^= 1; }
       if (p.x < -0.08 || p.x > 1.08) { p.state = "gone"; p.t = 0; }
       break;
@@ -192,11 +210,11 @@ function collide(dt) {
     if (a.controller !== ME.id) continue;
     if (a.state !== "thrown" && a.state !== "held" && a.state !== "oncursor") continue;
     if (now() - (a.hitAt || 0) < 250) continue;
-    const ax0 = a.x - a.vx * dt, ay0 = a.y - a.vy * dt;
+    const ax0 = (a.x - a.vx * dt) * CW, ay0 = (a.y - a.vy * dt) * CH;
     for (const b of pets.values()) {
       if (b === a || b.state === "gone") continue;
-      const d = segDist(b.x, b.y, ax0, ay0, a.x, a.y);
-      if (d < PET_R * 2) {
+      const d = segDist(b.x * CW, b.y * CH, ax0, ay0, a.x * CW, a.y * CH);
+      if (d < COLLIDE_R * 2) {
         const dd = Math.hypot(a.x - b.x, a.y - b.y) || 1;
         const nx = (a.x - b.x) / dd, ny = (a.y - b.y) / dd, K = 0.5;
         a.hitAt = now(); a.state = "thrown";
@@ -269,14 +287,19 @@ setInterval(() => {
   } else if (cmd === "quit") { ws.close(); process.exit(0); }
 }, 150);
 
-// occasional random leap (like a real friend's app)
+// occasional random leap, at the group's configured frequency (0 = never)
+function jumpDelay() {
+  return config.jumpEvery > 0 ? config.jumpEvery * 1000 * (0.5 + Math.random()) : Infinity;
+}
+let nextLeapAt = now() + jumpDelay();
 setInterval(() => {
+  if (now() < nextLeapAt) return;
+  nextLeapAt = now() + jumpDelay();
   const mine = pets.get(ME.id);
-  if (!mine || (mine.state !== "walk" && mine.state !== "gone")) return;
-  if (Math.random() > 0.4) return;
+  if (!mine || mine.state !== "walk") return;
   const target = [...pets.values()].find((p) => p.owner !== ME.id && p.state !== "gone")?.owner;
   if (target) { leap(target); log(`[claude] 🎲 salto random sobre tu cursor!`); }
-}, 15000);
+}, 1000);
 
 ws.on("close", () => { log("[claude] desconectado"); process.exit(0); });
 ws.on("error", (e) => log(`[claude] error: ${e.message}`));

@@ -17,14 +17,15 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
-// Make the overlay cover the primary monitor, sit on top, ignore the mouse, and show.
+// Make the overlay cover the primary monitor's WORK AREA (visible frame, excluding
+// the Dock / menu bar / taskbar), sit on top, ignore the mouse, and show. Using the
+// work area (not the full monitor) keeps pets on the visible floor instead of behind
+// the Dock/taskbar, on both macOS and Windows.
 fn arm_overlay(win: &WebviewWindow) {
-    // Cover the whole primary monitor.
     if let Ok(Some(monitor)) = win.primary_monitor() {
-        let size = monitor.size();
-        let pos = monitor.position();
-        let _ = win.set_position(tauri::PhysicalPosition::new(pos.x, pos.y));
-        let _ = win.set_size(tauri::PhysicalSize::new(size.width, size.height));
+        let wa = monitor.work_area();
+        let _ = win.set_position(tauri::PhysicalPosition::new(wa.position.x, wa.position.y));
+        let _ = win.set_size(tauri::PhysicalSize::new(wa.size.width, wa.size.height));
     }
     // Click-through: the pet must never steal clicks from what's underneath.
     let _ = win.set_ignore_cursor_events(true);
@@ -54,7 +55,11 @@ pub fn run() {
             presence::net_claim,
             presence::net_snap,
             presence::net_cursor,
-            presence::net_bump
+            presence::net_bump,
+            presence::get_config,
+            presence::net_config,
+            presence::get_dnd,
+            presence::set_dnd
         ])
         .setup(|app| {
             // --- Tray icon + context menu -------------------------------------

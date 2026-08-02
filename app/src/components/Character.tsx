@@ -54,11 +54,20 @@ export function Character({
       {/* belly */}
       <ellipse cx="12" cy={14 + bob} rx="4.2" ry="4.6" fill={c.accent} opacity="0.85" />
 
-      {/* eyes */}
-      <circle cx="9.6" cy={11 + bob} r="1.8" fill="#fff" />
-      <circle cx="14.4" cy={11 + bob} r="1.8" fill="#fff" />
-      <circle cx="9.9" cy={11.3 + bob} r="0.95" fill={c.eye} />
-      <circle cx="14.1" cy={11.3 + bob} r="0.95" fill={c.eye} />
+      {/* eyes — closed (sleeping) or open */}
+      {pose === "sleep" ? (
+        <>
+          <path d={`M8.2 ${11 + bob} q1.4 1.4 2.8 0`} fill="none" stroke={c.eye} strokeWidth="0.9" strokeLinecap="round" />
+          <path d={`M13 ${11 + bob} q1.4 1.4 2.8 0`} fill="none" stroke={c.eye} strokeWidth="0.9" strokeLinecap="round" />
+        </>
+      ) : (
+        <>
+          <circle cx="9.6" cy={11 + bob} r="1.8" fill="#fff" />
+          <circle cx="14.4" cy={11 + bob} r="1.8" fill="#fff" />
+          <circle cx="9.9" cy={11.3 + bob} r="0.95" fill={c.eye} />
+          <circle cx="14.1" cy={11.3 + bob} r="0.95" fill={c.eye} />
+        </>
+      )}
       {/* cheeks */}
       <circle cx="7.6" cy={13.4 + bob} r="1" fill={"#f472b6"} opacity="0.5" />
       <circle cx="16.4" cy={13.4 + bob} r="1" fill={"#f472b6"} opacity="0.5" />

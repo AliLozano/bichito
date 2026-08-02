@@ -1,12 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { type CharacterId, type Pose } from "../lib/characters";
+import { DEFAULT_CONFIG, type WorldConfig } from "../lib/store";
 
 // The shared "pet world". Everything is NORMALIZED (0..1). A pet I control is
 // simulated locally at 60fps and broadcast ~20Hz; pets I don't control are
 // PREDICTED from their last snapshot (dead reckoning) so dropped packets don't
 // drop render frames. Either player can grab/throw any pet (control handoff).
 
-export type PetState = "walk" | "held" | "thrown" | "leap" | "oncursor" | "dizzy" | "flee" | "gone";
+export type PetState =
+  | "walk"
+  | "sleeping"
+  | "held"
+  | "thrown"
+  | "leap"
+  | "oncursor"
+  | "dizzy"
+  | "flee"
+  | "gone";
 
 export interface Pet {
   owner: string;
@@ -31,6 +41,11 @@ export interface Pet {
   offY: number;
   hold: number;
   hitAt: number;
+  // gentle-placement tracking: a held pet released with a short travel settles to
+  // sleep in place instead of getting dizzy and fleeing.
+  placed: boolean;
+  lx: number; // launch position when it entered "thrown"
+  ly: number;
   // grip-battle cursor tracking (oncursor): prev cursor pos + smoothed speed
   pcx: number;
   pcy: number;
@@ -49,13 +64,14 @@ export interface RemoteCursor {
 
 // physics in normalized units (y grows downward). aspect-agnostic on purpose.
 const G = 2.6; // gravity /s^2
-const FLOOR = 0.9;
+const FLOOR_MARGIN = 0.2; // gap below the sprite, as a fraction of the sprite size (px-consistent on any screen)
 const WALK = 0.05;
-const RUN = 0.26;
-const PET_R = 0.03; // collision radius (normalized)
+export const SPRITE_PX = 56; // pet sprite size in CSS px (shared with PetView)
+export const COLLIDE_R = SPRITE_PX * 0.45; // pet↔pet collision radius in px (isotropic circle)
 const SNAP_MS = 45;
 const CURSOR_MS = 45;
 const DIZZY = 1.4; // dazed pause after landing — a window to grab it before it flees
+const GENTLE_DIST = 0.16; // a released pet that traveled less than this settles to sleep in place (no dizzy/flee)
 const MAX_THROW = 1.6; // cap on throw speed (norm/s) — a hard flick can't fling it infinitely fast
 
 // shortest distance from point (px,py) to segment (x1,y1)-(x2,y2) — for swept collision
@@ -80,6 +96,27 @@ export class Sim {
   cursors = new Map<string, RemoteCursor>();
   myCursor = { x: 0.5, y: 0.5 };
   charging = false; // mouse held down over a pet
+  config: WorldConfig = { ...DEFAULT_CONFIG }; // shared group vibe (synced)
+
+  setConfig(c: WorldConfig) {
+    this.config = c;
+  }
+
+  // Floor line (normalized y) so the sprite's BOTTOM sits FLOOR_MARGIN*sprite above
+  // the screen bottom — a pixel-consistent gap on any resolution (sprite center is
+  // half a sprite above its bottom, plus the margin).
+  floor(): number {
+    const H = window.innerHeight || 1;
+    return 1 - (SPRITE_PX * (0.5 + FLOOR_MARGIN)) / H;
+  }
+
+  // deterministic sleeping slot so pets lie down side by side (ranked by owner id),
+  // all lined up on the left edge instead of overlapping.
+  private sleepX(p: Pet): number {
+    const owners = [...this.pets.keys()].sort();
+    const rank = Math.max(0, owners.indexOf(p.owner));
+    return 0.05 + rank * 0.055;
+  }
   private lastSnapSent = new Map<string, number>();
   private lastCursorSent = 0;
   // Ghost-cursor visibility: an explicit shown/hidden flag broadcast to others.
@@ -131,7 +168,7 @@ export class Sim {
       controller,
       state: "walk",
       x: 0.5,
-      y: FLOOR,
+      y: this.floor(),
       vx: 0,
       vy: 0,
       flip: false,
@@ -146,6 +183,9 @@ export class Sim {
       offY: 0,
       hold: 0,
       hitAt: 0,
+      placed: false,
+      lx: 0,
+      ly: 0,
       pcx: NaN,
       pcy: NaN,
       spd: 0,
@@ -214,6 +254,7 @@ export class Sim {
     const p = this.pets.get(owner);
     if (p && p.controller === this.me) {
       p.state = "thrown";
+      p.placed = false; // a collision makes it flee, not settle
       p.vx = vx;
       p.vy = vy;
       p.t = 0;
@@ -226,12 +267,20 @@ export class Sim {
   }
 
   // --- input --------------------------------------------------------------
-  petAt(px: number, py: number): Pet | undefined {
+  // Hit-test as a pixel CIRCLE sized to the actual sprite (SPRITE_PX), so it's
+  // resolution/DPI-independent and isotropic (no aspect-distorted "padding").
+  // `radiusPx` lets callers use a tight radius for grabbing and a generous one
+  // for arming click-capture (which needs margin to beat toggle latency).
+  petAt(px: number, py: number, radiusPx: number = SPRITE_PX * 0.64): Pet | undefined {
+    const W = window.innerWidth || 1;
+    const H = window.innerHeight || 1;
+    const cx = px * W;
+    const cy = py * H;
     let best: Pet | undefined;
-    let bd = PET_R * 1.6;
+    let bd = radiusPx;
     for (const p of this.pets.values()) {
       if (p.state === "gone") continue;
-      const d = Math.hypot(p.x - px, p.y - py);
+      const d = Math.hypot(p.x * W - cx, p.y * H - cy);
       if (d < bd) {
         bd = d;
         best = p;
@@ -259,6 +308,10 @@ export class Sim {
       p.vx = (p.vx / sp) * MAX_THROW;
       p.vy = (p.vy / sp) * MAX_THROW;
     }
+    // eligible to settle-and-sleep if it lands close to here (a gentle placement)
+    p.placed = true;
+    p.lx = p.x;
+    p.ly = p.y;
     p.state = "thrown";
     p.t = 0;
   }
@@ -298,6 +351,7 @@ export class Sim {
   }
 
   private simulate(p: Pet, dt: number) {
+    const FLOOR = this.floor();
     p.t += dt;
     switch (p.state) {
       case "walk": {
@@ -306,12 +360,33 @@ export class Sim {
           p.frameAcc = 0;
           p.frame ^= 1;
         }
-        const goal = p.wanderNext; // reused as target x
+        // after wandering for walkTime, get sleepy: go to the shared sleeping spot
+        // (all pets line up next to each other on the left edge).
+        const sleepy = p.t > this.config.walkTime;
+        const goal = sleepy ? this.sleepX(p) : p.wanderNext;
         const dir = goal > p.x ? 1 : -1;
         p.x += dir * WALK * dt;
         p.flip = dir < 0;
         p.y = FLOOR;
         if (Math.abs(p.x - goal) < 0.02) {
+          if (sleepy) {
+            p.state = "sleeping";
+            p.t = 0;
+          } else {
+            p.wanderNext = rand(0.1, 0.9);
+          }
+        }
+        break;
+      }
+      case "sleeping": {
+        p.y = FLOOR;
+        p.frameAcc += dt; // slow breathing
+        if (p.frameAcc > 0.6) {
+          p.frameAcc = 0;
+          p.frame ^= 1;
+        }
+        if (p.t > this.config.sleepTime) {
+          p.state = "walk";
           p.wanderNext = rand(0.1, 0.9);
           p.t = 0;
         }
@@ -387,9 +462,9 @@ export class Sim {
         if (p.lphase === "run") {
           p.y = FLOOR;
           const dir = edge > p.x ? 1 : -1;
-          p.vx = dir * RUN * 1.7; // real velocity so viewers extrapolate smoothly
+          p.vx = dir * this.config.runSpeed * 1.7; // fast so the mouse can't escape
           p.vy = 0;
-          p.x += p.vx * dt; // fast, so the mouse can't escape
+          p.x += p.vx * dt;
           p.flip = dir < 0;
           if (Math.abs(p.x - edge) < 0.03) {
             p.x = edge;
@@ -460,13 +535,16 @@ export class Sim {
           p.vx *= 0.8;
         }
         if (p.y >= FLOOR - 0.005 && Math.abs(p.vy) < 0.12 && Math.abs(p.vx) < 0.06) {
-          // land dazed — sit and wobble for a beat so it can be grabbed again
-          p.state = "dizzy";
+          const gentle = p.placed && Math.hypot(p.x - p.lx, p.y - p.ly) < GENTLE_DIST;
+          p.placed = false;
           p.spin = 0;
           p.vx = 0;
           p.vy = 0;
           p.y = FLOOR;
           p.t = 0;
+          // a gentle placement settles to sleep right here; a real throw gets dizzy
+          // and then runs off.
+          p.state = gentle ? "sleeping" : "dizzy";
         }
         break;
       }
@@ -491,7 +569,7 @@ export class Sim {
           p.frame ^= 1;
         }
         const dir = p.wanderNext > p.x ? 1 : -1;
-        p.x += dir * RUN * dt;
+        p.x += dir * this.config.runSpeed * dt;
         p.flip = dir < 0;
         p.y = FLOOR;
         if (p.x < -0.08 || p.x > 1.08) {
@@ -526,6 +604,7 @@ export class Sim {
     } else if (
       p.state === "flee" ||
       p.state === "walk" ||
+      p.state === "sleeping" ||
       p.state === "dizzy" ||
       p.state === "leap"
     ) {
@@ -540,6 +619,11 @@ export class Sim {
   }
 
   private collide(now: number, dt: number) {
+    // detect in PIXELS so the collision zone is a real circle (normalized units are
+    // aspect-distorted). Positions convert to px via the window; the bounce direction
+    // stays normalized (velocities are normalized).
+    const W = window.innerWidth || 1;
+    const H = window.innerHeight || 1;
     for (const a of this.pets.values()) {
       if (a.controller !== this.me) continue;
       // a pet is a collider while thrown, held, or clinging to my cursor (oncursor)
@@ -548,18 +632,20 @@ export class Sim {
       if (now - a.hitAt < 250) continue;
       // where a was last frame — check the whole swept segment, not just the
       // endpoint, so a fast pet can't tunnel straight through another.
-      const ax0 = a.x - a.vx * dt;
-      const ay0 = a.y - a.vy * dt;
+      const ax0 = (a.x - a.vx * dt) * W;
+      const ay0 = (a.y - a.vy * dt) * H;
       for (const b of this.pets.values()) {
         if (b === a || b.state === "gone") continue;
-        const d = segDist(b.x, b.y, ax0, ay0, a.x, a.y);
-        if (d < PET_R * 2) {
-          const nx = (a.x - b.x) / (Math.hypot(a.x - b.x, a.y - b.y) || 1);
-          const ny = (a.y - b.y) / (Math.hypot(a.x - b.x, a.y - b.y) || 1);
+        const d = segDist(b.x * W, b.y * H, ax0, ay0, a.x * W, a.y * H);
+        if (d < COLLIDE_R * 2) {
+          const dd = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+          const nx = (a.x - b.x) / dd;
+          const ny = (a.y - b.y) / dd;
           const K = 0.5;
           // recoil myself — knocked loose off the cursor/hand into a bounce
           a.hitAt = now;
           a.state = "thrown";
+          a.placed = false;
           a.vx = nx * K;
           a.vy = ny * K - 0.2;
           a.t = 0;
@@ -568,6 +654,7 @@ export class Sim {
           const bvy = -ny * K - 0.2;
           if (b.controller === this.me) {
             b.state = "thrown";
+            b.placed = false;
             b.vx = bvx;
             b.vy = bvy;
             b.t = 0;
@@ -621,6 +708,8 @@ export class Sim {
         return "walk";
       case "leap":
         return p.lphase === "jump" ? "jump" : "walk";
+      case "sleeping":
+        return "sleep";
       case "dizzy":
         return "idle";
       case "held":

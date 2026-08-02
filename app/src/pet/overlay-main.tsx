@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Sim } from "./sim";
+import { Sim, SPRITE_PX } from "./sim";
 import { PetView } from "./PetView";
 import { CursorGhost } from "./CursorGhost";
-import { loadProfile, type Profile } from "../lib/store";
+import { loadProfile, loadConfig, type Profile, type WorldConfig } from "../lib/store";
 import "../styles.css";
 
 // The overlay drives a single shared "pet world" Sim: pets I control are
@@ -35,6 +35,11 @@ function Overlay() {
         .then((pets) => sim.onWorld(pets, performance.now()))
         .catch(() => {});
     });
+    // adopt the shared group config (local default, then the server's if present)
+    loadConfig().then((c) => sim.setConfig(c));
+    invoke<WorldConfig | null>("get_config")
+      .then((c) => c && sim.setConfig(c))
+      .catch(() => {});
 
     // --- ingest from the server (via Rust presence events) ------------------
     const subs = [
@@ -54,13 +59,18 @@ function Overlay() {
         sim.onBump(e.payload.owner, e.payload.vx, e.payload.vy)
       ),
       listen<{ target: string }>("leap", (e) => sim.leap(e.payload.target)),
+      listen<WorldConfig>("config", (e) => sim.setConfig(e.payload)),
     ];
 
     // --- main loop ----------------------------------------------------------
     let raf = 0;
     let last = performance.now();
     let clickThrough = true;
-    let nextAutoLeap = performance.now() + 30000 + Math.random() * 40000;
+    const nextJumpDelay = () => {
+      const every = sim.config.jumpEvery; // seconds; 0 = never
+      return every > 0 ? every * 1000 * (0.5 + Math.random()) : Infinity;
+    };
+    let nextAutoLeap = performance.now() + nextJumpDelay();
 
     const loop = (now: number) => {
       const dt = Math.min((now - last) / 1000, 0.05);
@@ -71,7 +81,8 @@ function Overlay() {
       // clinging to my cursor (oncursor) is NOT grabbable, so don't capture for it —
       // otherwise the overlay eats my scroll/clicks the whole time it's on me. The
       // grip shake works off the native cursor poller, so capture isn't needed.
-      const under = sim.petAt(sim.myCursor.x, sim.myCursor.y);
+      // arm capture with a GENEROUS radius (margin for clickthrough-toggle latency)
+      const under = sim.petAt(sim.myCursor.x, sim.myCursor.y, SPRITE_PX * 0.95);
       const hovering = !!under && under.state !== "oncursor";
       let holding = false;
       for (const p of sim.pets.values())
@@ -82,9 +93,9 @@ function Overlay() {
         invoke("set_clickthrough", { ignore: !wantCapture }).catch(() => {});
       }
 
-      // Occasionally leap my pet onto a random online friend.
+      // Occasionally leap my pet onto a random online friend (frequency from config).
       if (profileReady && now > nextAutoLeap) {
-        nextAutoLeap = now + 30000 + Math.random() * 40000;
+        nextAutoLeap = now + nextJumpDelay();
         const others = [...sim.pets.values()].filter(
           (p) => p.owner !== sim.me && p.state !== "gone"
         );
