@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 mod protocol;
-use protocol::{ClientMsg, PetInfo, PetStateWire, ServerMsg, UserInfo};
+use protocol::{ClientMsg, PetSnap, ServerMsg, UserInfo};
 
 struct Peer {
     name: String,
@@ -24,7 +24,7 @@ struct Peer {
 }
 
 type Registry = Arc<DashMap<String, Peer>>;
-type Pets = Arc<Mutex<HashMap<String, PetStateWire>>>;
+type Pets = Arc<Mutex<HashMap<String, PetSnap>>>; // owner -> latest snapshot
 
 #[derive(Clone)]
 struct AppState {
@@ -38,12 +38,10 @@ async fn main() {
         reg: Arc::new(DashMap::new()),
         pets: Arc::new(Mutex::new(HashMap::new())),
     };
-
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
         .with_state(state);
-
     let port = std::env::var("PORT").unwrap_or_else(|_| "8787".to_string());
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -59,51 +57,53 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     let mut writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if sink.send(msg).await.is_err() {
+        while let Some(m) = rx.recv().await {
+            if sink.send(m).await.is_err() {
                 break;
             }
         }
     });
 
     let mut my_id: Option<String> = None;
-
     loop {
         tokio::select! {
-            incoming = stream.next() => {
-                match incoming {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(msg) = serde_json::from_str::<ClientMsg>(&text) {
-                            handle_msg(&state, &mut my_id, &tx, msg);
-                        }
+            incoming = stream.next() => match incoming {
+                Some(Ok(Message::Text(t))) => {
+                    if let Ok(msg) = serde_json::from_str::<ClientMsg>(&t) {
+                        handle_msg(&state, &mut my_id, &tx, msg);
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
-                    Some(Ok(_)) => {}
                 }
-            }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Err(_)) => break,
+                Some(Ok(_)) => {}
+            },
             _ = &mut writer => break,
         }
     }
 
     if let Some(id) = my_id {
         state.reg.remove(&id);
-        // drop this pet + re-home any pet that referenced the leaver
-        let affected: Vec<String> = {
+        // remove this user's pet + hand back any pet they controlled to its owner
+        {
             let mut pets = state.pets.lock().unwrap();
             pets.remove(&id);
-            pets.iter()
-                .filter(|(_, s)| refers_to(s, &id))
-                .map(|(o, _)| o.clone())
-                .collect()
-        };
-        for o in affected {
-            reassign(&state, &o, None);
+            for snap in pets.values_mut() {
+                if snap.controller == id {
+                    snap.controller = snap.owner.clone();
+                }
+            }
         }
         broadcast_presence(&state.reg);
-        broadcast_pets(&state);
+        broadcast_world(&state);
     }
     writer.abort();
+}
+
+fn nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 fn handle_msg(
@@ -116,148 +116,97 @@ fn handle_msg(
         ClientMsg::Hello { id, name, character } => {
             state.reg.insert(
                 id.clone(),
-                Peer { name, character, tx: tx.clone() },
+                Peer { name: name.clone(), character: character.clone(), tx: tx.clone() },
             );
             *my_id = Some(id.clone());
-            reassign(state, &id, None); // home this new pet on a friend
-            // now that a new host exists, re-home anyone who was Idle (alone)
-            let idle: Vec<String> = {
-                let pets = state.pets.lock().unwrap();
-                pets.iter()
-                    .filter(|(o, s)| **s == PetStateWire::Idle && *o != &id)
-                    .map(|(o, _)| o.clone())
-                    .collect()
-            };
-            for o in idle {
-                reassign(state, &o, None);
-            }
+            // spawn this user's pet (they control it), walking in from an edge
+            let from_left = (nanos() & 1) == 0;
+            state.pets.lock().unwrap().entry(id.clone()).or_insert(PetSnap {
+                owner: id.clone(),
+                name,
+                character,
+                controller: id.clone(),
+                state: "walk".into(),
+                x: if from_left { -0.05 } else { 1.05 },
+                y: 0.9,
+                vx: 0.0,
+                vy: 0.0,
+                flip: !from_left,
+                frame: 0,
+                grip: 1.0,
+                target: String::new(),
+            });
             broadcast_presence(&state.reg);
-            broadcast_pets(state);
+            broadcast_world(state);
         }
-        ClientMsg::Leap { target } => {
+        ClientMsg::Claim { owner } => {
             let Some(me) = my_id.clone() else { return };
-            if target != me && state.reg.contains_key(&target) {
-                state
-                    .pets
-                    .lock()
-                    .unwrap()
-                    .insert(me, PetStateWire::Leaping { who: target });
-                broadcast_pets(state);
+            let mut changed = false;
+            if let Some(snap) = state.pets.lock().unwrap().get_mut(&owner) {
+                if snap.controller != me {
+                    snap.controller = me.clone();
+                    changed = true;
+                }
+            }
+            if changed {
+                broadcast(state, &ServerMsg::PeerClaim { owner, controller: me });
             }
         }
-        ClientMsg::Roamed { owner } => {
+        ClientMsg::Snap { snap } => {
+            // only the current controller may drive a pet: the sender must both
+            // claim to be the controller AND actually hold control server-side
+            // (guards against a stale client driving a pet after a handoff).
+            let Some(me) = my_id.as_deref() else { return };
+            if snap.controller != me {
+                return;
+            }
+            {
+                let mut pets = state.pets.lock().unwrap();
+                // the pet must already exist AND still be controlled by the sender.
+                // (absent = owner disconnected; don't let a non-owner resurrect a
+                // zombie pet by continuing to snapshot it.)
+                match pets.get(&snap.owner) {
+                    Some(cur) if cur.controller == me => {}
+                    _ => return,
+                }
+                pets.insert(snap.owner.clone(), snap.clone());
+            }
+            relay_others(state, me, &ServerMsg::PeerSnap { snap });
+        }
+        ClientMsg::Cursor { x, y, active } => {
             let Some(me) = my_id.clone() else { return };
-            let is_host = matches!(
-                state.pets.lock().unwrap().get(&owner),
-                Some(PetStateWire::Roaming { who }) if *who == me
-            );
-            if is_host {
-                reassign(state, &owner, Some(&me)); // move it to a DIFFERENT friend
-                broadcast_pets(state);
-            }
+            relay_others(state, &me, &ServerMsg::PeerCursor { from: me.clone(), x, y, active });
         }
-        ClientMsg::Dropped { owner } => {
-            let Some(me) = my_id.clone() else { return };
-            let is_target = matches!(
-                state.pets.lock().unwrap().get(&owner),
-                Some(PetStateWire::Leaping { who }) if *who == me
-            );
-            if is_target {
-                state
-                    .pets
-                    .lock()
-                    .unwrap()
-                    .insert(owner, PetStateWire::Bouncing { who: me });
-                broadcast_pets(state);
-            }
+        ClientMsg::Bump { owner, vx, vy } => {
+            let Some(me) = my_id.as_deref() else { return };
+            relay_others(state, me, &ServerMsg::PeerBump { owner, vx, vy });
         }
-        ClientMsg::Gone { owner } => {
-            let involved = matches!(
-                state.pets.lock().unwrap().get(&owner),
-                Some(PetStateWire::Bouncing { .. })
-            );
-            if involved {
-                reassign(state, &owner, None);
-                broadcast_pets(state);
-            }
-        }
-        // --- real-time relays ---
-        ClientMsg::Cursor { to, x, y } => {
-            relay(state, my_id, &to, |from| ServerMsg::PeerCursor { from, x, y })
-        }
-        ClientMsg::Grip { to, strength } => {
-            relay(state, my_id, &to, |from| ServerMsg::PeerGrip { from, strength })
-        }
-        ClientMsg::Hold { to, level } => {
-            relay(state, my_id, &to, |from| ServerMsg::PeerHold { from, level })
-        }
-        ClientMsg::Released { to } => {
-            relay(state, my_id, &to, |from| ServerMsg::PeerReleased { from })
-        }
-        ClientMsg::PetPos { to, owner, x, y, flip, pose } => relay(state, my_id, &to, |from| {
-            ServerMsg::PeerPetPos { from, owner, x, y, flip, pose }
-        }),
     }
 }
 
-fn refers_to(s: &PetStateWire, id: &str) -> bool {
-    matches!(
-        s,
-        PetStateWire::Roaming { who }
-            | PetStateWire::Leaping { who }
-            | PetStateWire::Bouncing { who } if who == id
-    )
+fn frame(msg: &ServerMsg) -> Message {
+    Message::Text(serde_json::to_string(msg).unwrap())
 }
 
-fn nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
-
-/// Put `owner`'s pet on a random online friend (Roaming), or Idle if alone.
-/// `exclude` forces a move to a different friend (used when it roams onward).
-fn reassign(state: &AppState, owner: &str, exclude: Option<&str>) {
-    let mut candidates: Vec<String> = state
-        .reg
-        .iter()
-        .map(|e| e.key().clone())
-        .filter(|id| id != owner)
-        .collect();
-    if let Some(ex) = exclude {
-        if candidates.len() > 1 {
-            candidates.retain(|id| id != ex);
-        }
-    }
-    let next = if candidates.is_empty() {
-        PetStateWire::Idle
-    } else {
-        PetStateWire::Roaming {
-            who: candidates[(nanos() as usize) % candidates.len()].clone(),
-        }
-    };
-    state.pets.lock().unwrap().insert(owner.to_string(), next);
-}
-
-fn broadcast_pets(state: &AppState) {
-    let list: Vec<PetInfo> = {
-        let pets = state.pets.lock().unwrap();
-        pets.iter()
-            .filter_map(|(owner, st)| {
-                state.reg.get(owner).map(|p| PetInfo {
-                    owner: owner.clone(),
-                    name: p.name.clone(),
-                    character: p.character.clone(),
-                    state: st.clone(),
-                })
-            })
-            .collect()
-    };
-    let frame = Message::Text(serde_json::to_string(&ServerMsg::Pets { pets: list }).unwrap());
+fn broadcast(state: &AppState, msg: &ServerMsg) {
+    let f = frame(msg);
     for e in state.reg.iter() {
-        let _ = e.value().tx.send(frame.clone());
+        let _ = e.value().tx.send(f.clone());
     }
+}
+
+fn relay_others(state: &AppState, from: &str, msg: &ServerMsg) {
+    let f = frame(msg);
+    for e in state.reg.iter() {
+        if e.key() != from {
+            let _ = e.value().tx.send(f.clone());
+        }
+    }
+}
+
+fn broadcast_world(state: &AppState) {
+    let pets: Vec<PetSnap> = state.pets.lock().unwrap().values().cloned().collect();
+    broadcast(state, &ServerMsg::World { pets });
 }
 
 fn broadcast_presence(reg: &Registry) {
@@ -269,23 +218,8 @@ fn broadcast_presence(reg: &Registry) {
             character: e.value().character.clone(),
         })
         .collect();
-    let frame = Message::Text(serde_json::to_string(&ServerMsg::Presence { users }).unwrap());
+    let f = frame(&ServerMsg::Presence { users });
     for e in reg.iter() {
-        let _ = e.value().tx.send(frame.clone());
-    }
-}
-
-fn relay(
-    state: &AppState,
-    from: &Option<String>,
-    to: &str,
-    make: impl FnOnce(String) -> ServerMsg,
-) {
-    let Some(from) = from else { return };
-    if let Some(target) = state.reg.get(to) {
-        let msg = make(from.clone());
-        let _ = target
-            .tx
-            .send(Message::Text(serde_json::to_string(&msg).unwrap()));
+        let _ = e.value().tx.send(f.clone());
     }
 }

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-// Mirror of server/src/protocol.rs — the authoritative pet model.
+// Mirror of server/src/protocol.rs — the shared "pet world". Everything is
+// NORMALIZED (0..1 of the screen). Each pet has a `controller` (the client
+// simulating it) that broadcasts snapshots ~20Hz; viewers dead-reckon between.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
@@ -9,21 +11,22 @@ pub struct UserInfo {
     pub character: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum PetStateWire {
-    Idle,
-    Roaming { who: String },
-    Leaping { who: String },
-    Bouncing { who: String },
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PetInfo {
+#[serde(rename_all = "camelCase")]
+pub struct PetSnap {
     pub owner: String,
     pub name: String,
     pub character: String,
-    pub state: PetStateWire,
+    pub controller: String,
+    pub state: String,
+    pub x: f64,
+    pub y: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub flip: bool,
+    pub frame: i64,
+    pub grip: f64,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,60 +37,23 @@ pub enum ClientMsg {
         name: String,
         character: String,
     },
-    Leap {
-        target: String,
-    },
-    Roamed {
-        owner: String,
-    },
-    Dropped {
-        owner: String,
-    },
-    Gone {
-        owner: String,
-    },
-    Cursor {
-        to: String,
-        x: f64,
-        y: f64,
-    },
-    Grip {
-        to: String,
-        strength: f64,
-    },
-    Hold {
-        to: String,
-        level: f64,
-    },
-    Released {
-        to: String,
-    },
-    PetPos {
-        to: String,
-        owner: String,
-        x: f64,
-        y: f64,
-        flip: bool,
-        pose: String,
-    },
+    /// Take control of the pet owned by `owner` (on grab/leap).
+    Claim { owner: String },
+    /// Broadcast a pet snapshot (I'm its controller).
+    Snap { snap: PetSnap },
+    /// My cursor + whether I'm interacting (show my ghost to others).
+    Cursor { x: f64, y: f64, active: bool },
+    /// Impart velocity to a pet (a collision I detected against it).
+    Bump { owner: String, vx: f64, vy: f64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerMsg {
     Presence { users: Vec<UserInfo> },
-    Pets { pets: Vec<PetInfo> },
-    PeerCursor { from: String, x: f64, y: f64 },
-    PeerGrip { from: String, strength: f64 },
-    PeerHold { from: String, level: f64 },
-    PeerReleased { from: String },
-    #[serde(rename_all = "camelCase")]
-    PeerPetPos {
-        from: String,
-        owner: String,
-        x: f64,
-        y: f64,
-        flip: bool,
-        pose: String,
-    },
+    World { pets: Vec<PetSnap> },
+    PeerClaim { owner: String, controller: String },
+    PeerSnap { snap: PetSnap },
+    PeerCursor { from: String, x: f64, y: f64, active: bool },
+    PeerBump { owner: String, vx: f64, vy: f64 },
 }

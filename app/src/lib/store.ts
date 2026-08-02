@@ -18,11 +18,12 @@ const DEFAULT_PROFILE: Profile = {
   onboarded: false,
 };
 
-let store: Store | null = null;
+// Cache the PROMISE, not the resolved store, so concurrent callers share one
+// load() instead of racing two Store handles against the same file.
+let storePromise: Promise<Store> | null = null;
 
-async function getStore(): Promise<Store> {
-  if (!store) store = await load("bichito.json", { autoSave: true });
-  return store;
+function getStore(): Promise<Store> {
+  return (storePromise ??= load("bichito.json", { autoSave: true }));
 }
 
 export async function loadProfile(): Promise<Profile> {

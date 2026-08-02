@@ -11,20 +11,20 @@ use tauri::{
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::protocol::{ClientMsg, PetInfo, ServerMsg, UserInfo};
+use crate::protocol::{ClientMsg, PetSnap, ServerMsg, UserInfo};
 use tauri_plugin_store::StoreExt;
 
 /// App-global presence state, managed via `app.manage(...)`.
 #[derive(Default)]
 pub struct PresenceState {
-    /// Channel to the WS task (menu clicks push `ClientMsg` here).
+    /// Channel to the WS task (menu clicks + commands push `ClientMsg` here).
     pub tx: Mutex<Option<UnboundedSender<ClientMsg>>>,
     /// My own user id (to exclude myself from the friends menu).
     pub me: Mutex<Option<String>>,
     /// Latest online snapshot from the server.
     pub online: Mutex<Vec<UserInfo>>,
-    /// Latest authoritative pet table (so the overlay can fetch it on load).
-    pub pets: Mutex<Vec<PetInfo>>,
+    /// Latest full world (so the overlay can fetch it on load).
+    pub world: Mutex<Vec<PetSnap>>,
     /// Whether the WS is currently connected.
     pub connected: AtomicBool,
     /// Guards against starting the task twice.
@@ -78,7 +78,6 @@ pub fn start(app: &AppHandle) {
     *state.tx.lock().unwrap() = Some(tx);
 
     let app = app.clone();
-    tauri::async_runtime::spawn(random_leaps(app.clone(), id.clone()));
     tauri::async_runtime::spawn(run(app, id, name, character, rx));
 }
 
@@ -88,44 +87,78 @@ pub fn get_online(app: AppHandle) -> Vec<UserInfo> {
     app.state::<PresenceState>().online.lock().unwrap().clone()
 }
 
-/// Current authoritative pet table (the overlay fetches this on load).
+/// Current full world (the overlay fetches this on load).
 #[tauri::command]
-pub fn get_pets(app: AppHandle) -> Vec<PetInfo> {
-    app.state::<PresenceState>().pets.lock().unwrap().clone()
+pub fn get_world(app: AppHandle) -> Vec<PetSnap> {
+    app.state::<PresenceState>().world.lock().unwrap().clone()
 }
 
-/// Push a message to the WS task (used by menu clicks and the cursor module).
+/// Push a message to the WS task (used by commands + menu clicks).
 pub fn send(app: &AppHandle, msg: ClientMsg) {
     if let Some(tx) = app.state::<PresenceState>().tx.lock().unwrap().clone() {
         let _ = tx.send(msg);
     }
 }
 
-/// Occasionally leap onto a random online friend — "a cualquier hora".
-async fn random_leaps(app: AppHandle, me: String) {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        if nanos % 100 >= 18 {
-            continue; // ~18% chance per tick
-        }
-        let online: Vec<String> = {
-            let st = app.state::<PresenceState>();
-            let list = st.online.lock().unwrap();
-            list.iter()
-                .filter(|u| u.id != me)
-                .map(|u| u.id.clone())
-                .collect()
-        };
-        if online.is_empty() {
-            continue;
-        }
-        let pick = online[(nanos as usize) % online.len()].clone();
-        send(&app, ClientMsg::Leap { target: pick });
-    }
+// --- commands the overlay Sim uses to drive the shared world -----------------
+
+/// Take control of the pet owned by `owner`.
+#[tauri::command]
+pub fn net_claim(app: AppHandle, owner: String) {
+    send(&app, ClientMsg::Claim { owner });
+}
+
+/// Broadcast a snapshot of a pet I control.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn net_snap(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    character: String,
+    controller: String,
+    state: String,
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    flip: bool,
+    frame: i64,
+    grip: f64,
+    target: String,
+) {
+    send(
+        &app,
+        ClientMsg::Snap {
+            snap: PetSnap {
+                owner,
+                name,
+                character,
+                controller,
+                state,
+                x,
+                y,
+                vx,
+                vy,
+                flip,
+                frame,
+                grip,
+                target,
+            },
+        },
+    );
+}
+
+/// Broadcast my cursor + whether I'm interacting.
+#[tauri::command]
+pub fn net_cursor(app: AppHandle, x: f64, y: f64, active: bool) {
+    send(&app, ClientMsg::Cursor { x, y, active });
+}
+
+/// Impart a collision velocity to a pet someone else controls.
+#[tauri::command]
+pub fn net_bump(app: AppHandle, owner: String, vx: f64, vy: f64) {
+    send(&app, ClientMsg::Bump { owner, vx, vy });
 }
 
 /// Long-lived task: connect, announce, pump messages, reconnect on drop.
@@ -186,71 +219,37 @@ fn handle_server(app: &AppHandle, text: &str) {
         ServerMsg::Presence { users } => {
             *app.state::<PresenceState>().online.lock().unwrap() = users.clone();
             rebuild_tray(app);
-            let _ = app.emit("presence", users); // for a future in-app friends UI
+            let _ = app.emit("presence", users);
         }
-        ServerMsg::Pets { pets } => {
-            // authoritative pet table -> the overlay renders from this
-            *app.state::<PresenceState>().pets.lock().unwrap() = pets.clone();
-            let _ = app.emit_to("overlay", "pets", pets);
+        ServerMsg::World { pets } => {
+            *app.state::<PresenceState>().world.lock().unwrap() = pets.clone();
+            let _ = app.emit_to("overlay", "world", pets);
         }
-        ServerMsg::PeerCursor { from, x, y } => {
+        ServerMsg::PeerClaim { owner, controller } => {
+            let _ = app.emit_to(
+                "overlay",
+                "peer-claim",
+                serde_json::json!({ "owner": owner, "controller": controller }),
+            );
+        }
+        ServerMsg::PeerSnap { snap } => {
+            let _ = app.emit_to("overlay", "peer-snap", snap);
+        }
+        ServerMsg::PeerCursor { from, x, y, active } => {
             let _ = app.emit_to(
                 "overlay",
                 "peer-cursor",
-                serde_json::json!({ "from": from, "x": x, "y": y }),
+                serde_json::json!({ "from": from, "x": x, "y": y, "active": active }),
             );
         }
-        ServerMsg::PeerGrip { from, strength } => {
+        ServerMsg::PeerBump { owner, vx, vy } => {
             let _ = app.emit_to(
                 "overlay",
-                "peer-grip",
-                serde_json::json!({ "from": from, "strength": strength }),
-            );
-        }
-        ServerMsg::PeerHold { from, level } => {
-            let _ = app.emit_to(
-                "overlay",
-                "peer-hold",
-                serde_json::json!({ "from": from, "level": level }),
-            );
-        }
-        ServerMsg::PeerReleased { from } => {
-            let _ = app.emit_to("overlay", "peer-released", serde_json::json!({ "from": from }));
-        }
-        ServerMsg::PeerPetPos { from, owner, x, y, flip, pose } => {
-            let _ = app.emit_to(
-                "overlay",
-                "peer-petpos",
-                serde_json::json!({ "from": from, "owner": owner, "x": x, "y": y, "flip": flip, "pose": pose }),
+                "peer-bump",
+                serde_json::json!({ "owner": owner, "vx": vx, "vy": vy }),
             );
         }
     }
-}
-
-// --- commands the overlay uses to drive the authoritative model --------------
-
-/// Throw MY pet at a friend (tray action or a UI-driven leap).
-#[tauri::command]
-pub fn leap(app: AppHandle, target: String) {
-    send(&app, ClientMsg::Leap { target });
-}
-
-/// My hosted pet (owner) walked off my screen -> ask the server to re-home it.
-#[tauri::command]
-pub fn roamed(app: AppHandle, owner: String) {
-    send(&app, ClientMsg::Roamed { owner });
-}
-
-/// A pet on my cursor let go -> it now bounces on my screen.
-#[tauri::command]
-pub fn dropped(app: AppHandle, owner: String) {
-    send(&app, ClientMsg::Dropped { owner });
-}
-
-/// A bouncing pet settled/faded -> back to roaming.
-#[tauri::command]
-pub fn gone(app: AppHandle, owner: String) {
-    send(&app, ClientMsg::Gone { owner });
 }
 
 fn set_connected(app: &AppHandle, connected: bool) {
@@ -262,14 +261,12 @@ fn set_connected(app: &AppHandle, connected: bool) {
     rebuild_tray(app);
 }
 
-/// Send `SendPet` for a `send:<id>` tray menu id. Returns true if handled.
+/// A `send:<id>` tray click -> tell the overlay to leap MY pet onto that friend.
 pub fn handle_menu(app: &AppHandle, menu_id: &str) -> bool {
     let Some(to) = menu_id.strip_prefix("send:") else {
         return false;
     };
-    if let Some(tx) = app.state::<PresenceState>().tx.lock().unwrap().clone() {
-        let _ = tx.send(ClientMsg::Leap { target: to.to_string() });
-    }
+    let _ = app.emit_to("overlay", "leap", serde_json::json!({ "target": to }));
     true
 }
 
@@ -298,7 +295,6 @@ fn rebuild_tray_inner(app: &AppHandle) -> tauri::Result<()> {
     let header = MenuItem::with_id(app, "header", header_text, false, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
 
-    // Collect friend items (everyone online except me).
     let friends: Vec<MenuItem<_>> = online
         .iter()
         .filter(|u| Some(&u.id) != me.as_ref())

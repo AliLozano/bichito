@@ -32,24 +32,6 @@ fn arm_overlay(win: &WebviewWindow) {
     let _ = win.show();
 }
 
-/// Debug logger for tuning the grip battle. No-op in release builds (dev only).
-#[tauri::command]
-fn dbg_log(line: String) {
-    #[cfg(debug_assertions)]
-    {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/bichito-battle.log")
-        {
-            let _ = writeln!(f, "{line}");
-        }
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = line;
-}
-
 #[tauri::command]
 fn finish_onboarding(app: tauri::AppHandle) {
     if let Some(overlay) = app.get_webview_window("overlay") {
@@ -65,21 +47,14 @@ pub fn run() {
         .manage(cursor::GrabState::default())
         .invoke_handler(tauri::generate_handler![
             finish_onboarding,
-            dbg_log,
             cursor::cursor_poll_start,
-            cursor::cursor_feed_start,
-            cursor::cursor_feed_stop,
             cursor::set_clickthrough,
-            cursor::peer_grip,
-            cursor::peer_hold,
-            cursor::peer_released,
-            cursor::pet_pos,
             presence::get_online,
-            presence::get_pets,
-            presence::leap,
-            presence::roamed,
-            presence::dropped,
-            presence::gone
+            presence::get_world,
+            presence::net_claim,
+            presence::net_snap,
+            presence::net_cursor,
+            presence::net_bump
         ])
         .setup(|app| {
             // --- Tray icon + context menu -------------------------------------
