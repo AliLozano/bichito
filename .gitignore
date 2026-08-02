@@ -1,0 +1,20 @@
+# frontend
+app/node_modules/
+app/dist/
+app/.vite/
+
+# rust / tauri
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
+# server (Hito 2)
+server/target/
+
+# landing (Hito 4)
+landing/node_modules/
+landing/dist/
+landing/.astro/
+
+# os
+.DS_Store
+*.log

@@ -1,0 +1,57 @@
+name: release
+
+# Build the desktop installers for Windows + macOS on a version tag (e.g. v0.1.0)
+# and publish them to a GitHub Release. The landing page links to these assets.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write # create the release + upload assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest # universal .dmg (Intel + Apple Silicon)
+            args: "--target universal-apple-darwin"
+            targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+          - platform: windows-latest # .msi + NSIS .exe
+            args: ""
+            targets: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend deps
+        working-directory: app
+        run: npm ci
+
+      - name: Build + release (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: "bichito ${{ github.ref_name }}"
+          releaseBody: "Descárgalo para tu sistema. macOS: click derecho → Abrir la primera vez."
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

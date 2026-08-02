@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>bichito-overlay</title>
+    <style>
+      /* The overlay window is transparent + click-through. Never paint a background. */
+      html, body, #overlay {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent !important;
+        overflow: hidden;
+        /* IMPORTANT: never hide the cursor. When the overlay stops being
+           click-through (to grab a pet) this style applies to the real cursor —
+           `cursor: none` here makes the user's mouse vanish. */
+        cursor: default;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="overlay"></div>
+    <script type="module" src="/src/pet/overlay-main.tsx"></script>
+  </body>
+</html>

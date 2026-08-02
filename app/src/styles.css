@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+/* Crisp pixel-art scaling for every sprite/SVG the pet uses. */
+.pixelated {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  shape-rendering: crispEdges;
+}
