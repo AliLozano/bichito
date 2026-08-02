@@ -32,3 +32,23 @@ jobs:
           tags: |
             ghcr.io/alilozano/bichito-server:latest
             ghcr.io/alilozano/bichito-server:${{ github.sha }}
+
+  # Roll out the freshly-built image so it actually goes live (no manual step).
+  # Uses the immutable :sha tag so K8s always performs the rollout. To enable:
+  #   1) add repo secret  DIGITALOCEAN_TOKEN  (a DO API token)
+  #   2) add repo variable AUTODEPLOY = true
+  # Skipped by default so the CI stays green until you configure it.
+  deploy:
+    needs: image
+    if: ${{ vars.AUTODEPLOY == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      - run: doctl kubernetes cluster kubeconfig save default-cluster
+      - name: Roll out the new image
+        run: |
+          kubectl set image deployment/bichito-server-app \
+            server=ghcr.io/alilozano/bichito-server:${{ github.sha }} -n prod
+          kubectl rollout status deployment/bichito-server-app -n prod --timeout=120s
