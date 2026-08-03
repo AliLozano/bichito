@@ -31,6 +31,8 @@ pub struct PresenceState {
     pub connected: AtomicBool,
     /// Do Not Disturb: while true we stay offline and the overlay is hidden.
     pub dnd: AtomicBool,
+    /// Version string of an available update (Some -> shows a tray item), if any.
+    pub update: Mutex<Option<String>>,
     /// Bumped each time DND is toggled, so a stale 30-min timer can't un-DND a
     /// freshly re-enabled session.
     dnd_gen: AtomicU64,
@@ -175,6 +177,13 @@ pub fn net_bump(app: AppHandle, owner: String, vx: f64, vy: f64) {
     send(&app, ClientMsg::Bump { owner, vx, vy });
 }
 
+/// Called by the overlay once it finds a newer version -> show a tray item.
+#[tauri::command]
+pub fn update_available(app: AppHandle, version: String) {
+    *app.state::<PresenceState>().update.lock().unwrap() = Some(version);
+    rebuild_tray(&app);
+}
+
 /// The current shared group config (settings/overlay fetch it on load).
 #[tauri::command]
 pub fn get_config(app: AppHandle) -> Option<WorldConfig> {
@@ -307,6 +316,7 @@ fn handle_server(app: &AppHandle, text: &str) {
         }
         ServerMsg::Config { config } => {
             *app.state::<PresenceState>().config.lock().unwrap() = Some(config.clone());
+            rebuild_tray(app); // reflect allowLeap in the friends menu
             let _ = app.emit_to("overlay", "config", config.clone());
             let _ = app.emit("config", config); // settings window
         }
@@ -380,6 +390,13 @@ fn rebuild_tray_inner(app: &AppHandle) -> tauri::Result<()> {
     let me = state.me.lock().unwrap().clone();
     let connected = state.connected.load(Ordering::Relaxed);
     let dnd_on = state.dnd.load(Ordering::Relaxed);
+    let allow_leap = state
+        .config
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.allow_leap)
+        .unwrap_or(true);
     let online = state.online.lock().unwrap().clone();
 
     let header_text = if dnd_on {
@@ -399,15 +416,39 @@ fn rebuild_tray_inner(app: &AppHandle) -> tauri::Result<()> {
             MenuItem::with_id(
                 app,
                 format!("send:{}", u.id),
-                format!("🐾 Saltar sobre {}", u.name),
-                connected,
+                if allow_leap {
+                    format!("🐾 Saltar sobre {}", u.name)
+                } else {
+                    format!("💤 {} (saltar desactivado)", u.name)
+                },
+                connected && allow_leap, // grayed out when leaping is off
                 None::<&str>,
             )
         })
         .collect::<Result<_, _>>()?;
 
+    // update-available banner at the very top of the menu, if any
+    let update_ver = state.update.lock().unwrap().clone();
+    let update_item = match &update_ver {
+        Some(v) => Some(MenuItem::with_id(
+            app,
+            "update",
+            format!("⬆️ Actualizar a {v}"),
+            true,
+            None::<&str>,
+        )?),
+        None => None,
+    };
+    let sep_upd = PredefinedMenuItem::separator(app)?;
+
     let empty;
-    let mut items: Vec<&dyn tauri::menu::IsMenuItem<_>> = vec![&header, &sep1];
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<_>> = Vec::new();
+    if let Some(ref u) = update_item {
+        items.push(u);
+        items.push(&sep_upd);
+    }
+    items.push(&header);
+    items.push(&sep1);
     if friends.is_empty() {
         let text = if connected {
             "Nadie más en línea"

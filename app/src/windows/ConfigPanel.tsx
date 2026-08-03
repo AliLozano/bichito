@@ -124,6 +124,30 @@ export function ConfigPanel() {
         onChange={(v) => set({ runSpeed: v })}
       />
       <button
+        onClick={() => set({ allowLeap: !cfg.allowLeap })}
+        className="flex items-center justify-between gap-3 w-full text-sm py-1"
+      >
+        <span className="flex flex-col items-start">
+          <span>Saltar sobre amigos</span>
+          <span className="text-xs text-white/40 text-left">
+            {cfg.allowLeap
+              ? "Se cuelgan del cursor del otro."
+              : "Modo tranquilo: solo se arrastran y caen, no saltan."}
+          </span>
+        </span>
+        <span
+          className={`shrink-0 w-11 h-6 rounded-full relative transition ${
+            cfg.allowLeap ? "bg-bichito-accent" : "bg-white/15"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${
+              cfg.allowLeap ? "left-[22px]" : "left-0.5"
+            }`}
+          />
+        </span>
+      </button>
+      <button
         onClick={apply}
         disabled={!dirty}
         className="py-2 rounded-xl bg-bichito-accent/20 hover:bg-bichito-accent/30 disabled:opacity-40 disabled:cursor-default text-sm transition"

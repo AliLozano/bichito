@@ -7,9 +7,13 @@ import { DEFAULT_CONFIG, type WorldConfig } from "../lib/store";
 // PREDICTED from their last snapshot (dead reckoning) so dropped packets don't
 // drop render frames. Either player can grab/throw any pet (control handoff).
 
+// idle "activities" a pet cycles through while at rest, instead of only sleeping
+export const IDLE_STATES = ["sleeping", "coding", "coffee", "music", "thinking"] as const;
+export type IdleState = (typeof IDLE_STATES)[number];
+
 export type PetState =
   | "walk"
-  | "sleeping"
+  | IdleState
   | "held"
   | "thrown"
   | "leap"
@@ -17,6 +21,11 @@ export type PetState =
   | "dizzy"
   | "flee"
   | "gone";
+
+function randIdle(exclude?: PetState): IdleState {
+  const opts = IDLE_STATES.filter((s) => s !== exclude);
+  return opts[Math.floor(Math.random() * opts.length)];
+}
 
 export interface Pet {
   owner: string;
@@ -35,6 +44,7 @@ export interface Pet {
   target: string; // oncursor: whose cursor
   // local-only bookkeeping
   t: number;
+  restT: number; // total time spent resting this cycle (across idle activities)
   frameAcc: number;
   lastSnap: number;
   offX: number;
@@ -72,6 +82,7 @@ const SNAP_MS = 45;
 const CURSOR_MS = 45;
 const DIZZY = 1.4; // dazed pause after landing — a window to grab it before it flees
 const GENTLE_DIST = 0.16; // a released pet that traveled less than this settles to sleep in place (no dizzy/flee)
+const MAX_LIFT_SPRITES = 4; // when leaping is off, a held pet lifted more than this many sprite-heights above the floor auto-drops
 const MAX_THROW = 1.6; // cap on throw speed (norm/s) — a hard flick can't fling it infinitely fast
 
 // shortest distance from point (px,py) to segment (x1,y1)-(x2,y2) — for swept collision
@@ -108,6 +119,17 @@ export class Sim {
   floor(): number {
     const H = window.innerHeight || 1;
     return 1 - (SPRITE_PX * (0.5 + FLOOR_MARGIN)) / H;
+  }
+
+  // begin a rest cycle at the edge: cycles through random idle activities (sleeping,
+  // coding, coffee, music…) instead of only sleeping. `wanderNext` is reused as the
+  // current activity's duration while resting.
+  private startRest(p: Pet, first?: PetState) {
+    p.state = first ?? randIdle();
+    p.wanderNext = rand(6, 14);
+    p.restT = 0;
+    p.t = 0;
+    p.frameAcc = 0;
   }
 
   // deterministic sleeping slot so pets lie down side by side (ranked by owner id),
@@ -177,6 +199,7 @@ export class Sim {
       grip: 1,
       target: "",
       t: 0,
+      restT: 0,
       frameAcc: 0,
       lastSnap: 0,
       offX: 0,
@@ -301,12 +324,18 @@ export class Sim {
 
   releaseHeld(p: Pet) {
     if (p.state !== "held") return;
-    // the fling inherits the cursor's speed — cap it so a hard flick can't launch
-    // it at "infinite" speed (which also causes it to tunnel through collisions).
-    const sp = Math.hypot(p.vx, p.vy);
-    if (sp > MAX_THROW) {
-      p.vx = (p.vx / sp) * MAX_THROW;
-      p.vy = (p.vy / sp) * MAX_THROW;
+    if (!this.config.allowLeap) {
+      // less-intrusive mode: no throw — just drop it straight down
+      p.vx = 0;
+      p.vy = 0;
+    } else {
+      // the fling inherits the cursor's speed — cap it so a hard flick can't launch
+      // it at "infinite" speed (which also causes it to tunnel through collisions).
+      const sp = Math.hypot(p.vx, p.vy);
+      if (sp > MAX_THROW) {
+        p.vx = (p.vx / sp) * MAX_THROW;
+        p.vy = (p.vy / sp) * MAX_THROW;
+      }
     }
     // eligible to settle-and-sleep if it lands close to here (a gentle placement)
     p.placed = true;
@@ -318,6 +347,7 @@ export class Sim {
 
   // send MY pet at a target: it runs to the edge, climbs, and leaps onto the cursor
   leap(target: string) {
+    if (!this.config.allowLeap) return; // leaping disabled (less-intrusive mode)
     const p = this.pets.get(this.me);
     if (!p || target === this.me) return;
     if (!this.pets.has(target)) return; // don't chase a ghost
@@ -369,30 +399,48 @@ export class Sim {
         p.flip = dir < 0;
         p.y = FLOOR;
         if (Math.abs(p.x - goal) < 0.02) {
-          if (sleepy) {
-            p.state = "sleeping";
-            p.t = 0;
-          } else {
-            p.wanderNext = rand(0.1, 0.9);
-          }
+          if (sleepy) this.startRest(p); // begin the idle-activity cycle at the edge
+          else p.wanderNext = rand(0.1, 0.9);
         }
         break;
       }
-      case "sleeping": {
+      // resting: cycle random idle activities (sleeping / coding / coffee / music /
+      // thinking). Each lasts `wanderNext` seconds; after the total rest budget
+      // (config.sleepTime) it wakes and walks again.
+      case "sleeping":
+      case "coding":
+      case "coffee":
+      case "music":
+      case "thinking": {
         p.y = FLOOR;
-        p.frameAcc += dt; // slow breathing
+        p.restT += dt;
+        p.frameAcc += dt;
         if (p.frameAcc > 0.6) {
           p.frameAcc = 0;
           p.frame ^= 1;
         }
-        if (p.t > this.config.sleepTime) {
-          p.state = "walk";
-          p.wanderNext = rand(0.1, 0.9);
-          p.t = 0;
+        if (p.t > p.wanderNext) {
+          if (p.restT > this.config.sleepTime) {
+            p.state = "walk";
+            p.wanderNext = rand(0.1, 0.9);
+            p.t = 0;
+          } else {
+            // switch to a different activity (keep resting)
+            const rest = p.restT;
+            this.startRest(p, randIdle(p.state));
+            p.restT = rest; // preserve total rest across the switch
+          }
         }
         break;
       }
       case "held": {
+        // less-intrusive mode: if you lift it more than a few sprite-heights above
+        // the floor, it drops instead of going up (px-consistent on any screen).
+        const maxLift = (MAX_LIFT_SPRITES * SPRITE_PX) / (window.innerHeight || 1);
+        if (!this.config.allowLeap && p.y < FLOOR - maxLift) {
+          this.releaseHeld(p);
+          break;
+        }
         const nx = this.myCursor.x + p.offX;
         const ny = this.myCursor.y + p.offY;
         p.vx = (nx - p.x) / Math.max(dt, 1e-3);
@@ -542,9 +590,10 @@ export class Sim {
           p.vy = 0;
           p.y = FLOOR;
           p.t = 0;
-          // a gentle placement settles to sleep right here; a real throw gets dizzy
-          // and then runs off.
-          p.state = gentle ? "sleeping" : "dizzy";
+          // a gentle placement settles into a rest cycle right here (starting asleep);
+          // a real throw gets dizzy and then runs off.
+          if (gentle) this.startRest(p, "sleeping");
+          else p.state = "dizzy";
         }
         break;
       }
@@ -604,9 +653,9 @@ export class Sim {
     } else if (
       p.state === "flee" ||
       p.state === "walk" ||
-      p.state === "sleeping" ||
       p.state === "dizzy" ||
-      p.state === "leap"
+      p.state === "leap" ||
+      (IDLE_STATES as readonly string[]).includes(p.state)
     ) {
       p.x += p.vx * dt; // usually 0; snapshots drive position
       p.frameAcc += dt;
@@ -710,6 +759,10 @@ export class Sim {
         return p.lphase === "jump" ? "jump" : "walk";
       case "sleeping":
         return "sleep";
+      case "coding":
+      case "coffee":
+      case "music":
+      case "thinking":
       case "dizzy":
         return "idle";
       case "held":

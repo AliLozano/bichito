@@ -25,6 +25,7 @@ export interface WorldConfig {
   sleepTime: number; // seconds asleep at the edge
   jumpEvery: number; // avg seconds between random leaps (0 = never)
   runSpeed: number; // flee/leap run speed (normalized/s)
+  allowLeap: boolean; // false = never leap onto cursors; released pets just fall (less intrusive)
 }
 
 export const DEFAULT_CONFIG: WorldConfig = {
@@ -32,6 +33,7 @@ export const DEFAULT_CONFIG: WorldConfig = {
   sleepTime: 25,
   jumpEvery: 3600, // ~once an hour by default (configurable 1/min .. 1/hr .. never)
   runSpeed: 0.26,
+  allowLeap: true,
 };
 
 // Cache the PROMISE, not the resolved store, so concurrent callers share one

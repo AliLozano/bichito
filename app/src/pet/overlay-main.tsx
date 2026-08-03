@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Sim, SPRITE_PX } from "./sim";
 import { PetView } from "./PetView";
 import { CursorGhost } from "./CursorGhost";
+import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import { loadProfile, loadConfig, type Profile, type WorldConfig } from "../lib/store";
 import "../styles.css";
 
@@ -39,6 +40,10 @@ function Overlay() {
     loadConfig().then((c) => sim.setConfig(c));
     invoke<WorldConfig | null>("get_config")
       .then((c) => c && sim.setConfig(c))
+      .catch(() => {});
+    // on startup, tell the tray if there's a newer version to install
+    checkUpdate()
+      .then((u) => u && invoke("update_available", { version: u.version }).catch(() => {}))
       .catch(() => {});
 
     // --- ingest from the server (via Rust presence events) ------------------

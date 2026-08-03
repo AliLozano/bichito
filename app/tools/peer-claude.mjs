@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 const URL = process.env.BICHITO_SERVER || "ws://127.0.0.1:8787/ws";
 const CMD_FILE = process.env.CMD_FILE || "/tmp/claude_cmd";
 const ME = { id: "claude-peer", name: process.env.PEER_NAME || "Claude", character: "fantasma" };
-const config = { walkTime: 25, sleepTime: 25, jumpEvery: 3600, runSpeed: 0.26 };
+const config = { walkTime: 25, sleepTime: 25, jumpEvery: 3600, runSpeed: 0.26, allowLeap: true };
 
 // physics (mirrors sim.ts)
 const G = 2.6, WALK = 0.05, RUN = 0.26, PET_R = 0.03;
@@ -18,6 +18,9 @@ const FLOOR = 1 - (56 * 0.7) / CH; // sprite bottom sits 0.2*sprite above the (a
 const SNAP_MS = 45, CURSOR_MS = 45, MAX_THROW = 1.6;
 const rand = (a, b) => a + Math.random() * (b - a);
 const now = () => Date.now();
+const IDLE = ["sleeping", "coding", "coffee", "music", "thinking"];
+const randIdle = (ex) => { const o = IDLE.filter((s) => s !== ex); return o[Math.floor(Math.random() * o.length)]; };
+function startRest(p, first) { p.state = first ?? randIdle(); p.wanderNext = rand(6, 14); p.restT = 0; p.t = 0; p.frameAcc = 0; }
 const segDist = (px, py, x1, y1, x2, y2) => {
   const dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy;
   let t = l2 > 0 ? ((px - x1) * dx + (py - y1) * dy) / l2 : 0;
@@ -58,7 +61,7 @@ function blank(owner, name, character, controller) {
   return {
     owner, name, character, controller, state: "walk",
     x: 0.5, y: FLOOR, vx: 0, vy: 0, flip: false, frame: 0, spin: 0, grip: 1, target: "",
-    t: 0, frameAcc: 0, hold: 0, offX: 0, offY: 0, wanderNext: rand(0.1, 0.9),
+    t: 0, restT: 0, frameAcc: 0, hold: 0, offX: 0, offY: 0, wanderNext: rand(0.1, 0.9),
     pcx: NaN, pcy: NaN, spd: 0, lphase: "run",
   };
 }
@@ -107,12 +110,15 @@ function simulate(p, dt) {
       const dir = goal > p.x ? 1 : -1;
       p.x += dir * WALK * dt; p.flip = dir < 0; p.y = FLOOR;
       p.frameAcc += dt; if (p.frameAcc > 0.12) { p.frameAcc = 0; p.frame ^= 1; }
-      if (Math.abs(p.x - goal) < 0.02) { if (sleepy) { p.state = "sleeping"; p.t = 0; } else p.wanderNext = rand(0.1, 0.9); }
+      if (Math.abs(p.x - goal) < 0.02) { if (sleepy) startRest(p); else p.wanderNext = rand(0.1, 0.9); }
       break;
     }
-    case "sleeping": {
-      p.y = FLOOR; p.frameAcc += dt; if (p.frameAcc > 0.6) { p.frameAcc = 0; p.frame ^= 1; }
-      if (p.t > config.sleepTime) { p.state = "walk"; p.wanderNext = rand(0.1, 0.9); p.t = 0; }
+    case "sleeping": case "coding": case "coffee": case "music": case "thinking": {
+      p.y = FLOOR; p.restT += dt; p.frameAcc += dt; if (p.frameAcc > 0.6) { p.frameAcc = 0; p.frame ^= 1; }
+      if (p.t > p.wanderNext) {
+        if (p.restT > config.sleepTime) { p.state = "walk"; p.wanderNext = rand(0.1, 0.9); p.t = 0; }
+        else { const r = p.restT; startRest(p, randIdle(p.state)); p.restT = r; }
+      }
       break;
     }
     case "held": {
@@ -266,6 +272,7 @@ setInterval(() => {
 
 // leap MY pet onto a target's cursor
 function leap(target) {
+  if (!config.allowLeap) return;
   const p = pets.get(ME.id);
   if (!p || target === ME.id || !pets.has(target)) return;
   if (p.state === "oncursor" || p.state === "held" || p.state === "leap" || p.state === "thrown") return;

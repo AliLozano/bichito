@@ -23,6 +23,14 @@ pub struct WorldConfig {
     pub sleep_time: f64, // seconds asleep at the edge
     pub jump_every: f64, // avg seconds between random leaps (0 = never)
     pub run_speed: f64,  // flee/leap run speed (normalized/s)
+    // When false, pets never leap onto cursors (tray/auto), a released pet just
+    // falls straight down, and a held pet lifted too high auto-drops. Less intrusive.
+    #[serde(default = "default_true")]
+    pub allow_leap: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One pet's authoritative snapshot. `state`: walk | held | thrown | oncursor |

@@ -85,6 +85,9 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // Auto-update: check a signed manifest on GitHub Releases, download + install.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(PresenceState::default())
         .manage(cursor::GrabState::default())
         .invoke_handler(tauri::generate_handler![
@@ -101,7 +104,8 @@ pub fn run() {
             presence::get_config,
             presence::net_config,
             presence::get_dnd,
-            presence::set_dnd
+            presence::set_dnd,
+            presence::update_available
         ])
         .setup(|app| {
             // --- Tray icon + context menu -------------------------------------
@@ -123,7 +127,7 @@ pub fn run() {
                         return;
                     }
                     match id {
-                        "prefs" => show_main(app),
+                        "prefs" | "update" => show_main(app),
                         "quit" => app.exit(0),
                         _ => {}
                     }

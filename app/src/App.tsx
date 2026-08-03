@@ -5,6 +5,7 @@ import { emitTo } from "@tauri-apps/api/event";
 import { isEnabled, enable, disable } from "@tauri-apps/plugin-autostart";
 import { Onboarding } from "./windows/Onboarding";
 import { ConfigPanel } from "./windows/ConfigPanel";
+import { Updater } from "./windows/Updater";
 import { Character } from "./components/Character";
 import { loadProfile, saveProfile, type Profile } from "./lib/store";
 import { getCharacter, type CharacterId } from "./lib/characters";
@@ -118,6 +119,10 @@ export function App() {
 
       <div className="border-t border-white/10 pt-4">
         <AutostartToggle />
+      </div>
+
+      <div className="border-t border-white/10 pt-4">
+        <Updater />
       </div>
 
       <button

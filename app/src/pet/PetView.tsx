@@ -6,6 +6,14 @@ import { SPRITE_PX, COLLIDE_R, type Pet, type Sim } from "./sim";
 // Thin renderer: draws one pet from the Sim, converting normalized (0..1) coords
 // to pixels at render time (x * innerWidth). No physics here — the Sim owns state.
 const SIZE = SPRITE_PX;
+// little prop shown above a resting pet, per idle activity
+const IDLE_EMOJI: Record<string, string> = {
+  sleeping: "💤",
+  coding: "💻",
+  coffee: "☕",
+  music: "🎧",
+  thinking: "💭",
+};
 const DEBUG_HIT = false; // draw the click hit-zones (grab/capture)
 const DEBUG_COLLISION = false; // draw the pet↔pet collision zone
 const GRAB_R = SPRITE_PX * 0.64; // must match petAt() default radius
@@ -96,18 +104,18 @@ export function PetView({ pet, sim, mine }: { pet: Pet; sim: Sim; mine: boolean 
             💫
           </div>
         )}
-        {pet.state === "sleeping" && (
+        {IDLE_EMOJI[pet.state] && (
           <div
             style={{
               position: "absolute",
               top: -10,
               left: "62%",
-              fontSize: 13,
-              opacity: 0.85,
+              fontSize: 14,
+              opacity: 0.9,
               pointerEvents: "none",
             }}
           >
-            💤
+            {IDLE_EMOJI[pet.state]}
           </div>
         )}
         <Character id={pet.character} pose={pose} size={SIZE} flip={pet.flip} frame={pet.frame} />

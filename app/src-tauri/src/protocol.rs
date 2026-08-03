@@ -19,6 +19,12 @@ pub struct WorldConfig {
     pub sleep_time: f64,
     pub jump_every: f64,
     pub run_speed: f64,
+    #[serde(default = "default_true")]
+    pub allow_leap: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
