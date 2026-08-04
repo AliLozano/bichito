@@ -7,7 +7,15 @@ import { Onboarding } from "./windows/Onboarding";
 import { ConfigPanel } from "./windows/ConfigPanel";
 import { Updater } from "./windows/Updater";
 import { Character } from "./components/Character";
-import { loadProfile, saveProfile, type Profile } from "./lib/store";
+import {
+  loadProfile,
+  saveProfile,
+  loadLocal,
+  saveLocal,
+  DEFAULT_LOCAL,
+  type Profile,
+  type LocalSettings,
+} from "./lib/store";
 import { getCharacter, type CharacterId } from "./lib/characters";
 
 // Local (per-device) toggle: launch bichito at login. Enabled by default after
@@ -47,8 +55,69 @@ function AutostartToggle() {
   );
 }
 
+// The "Local" (per-device) settings tab. These are NOT shared with the group: launch
+// at login, the FPS/latency HUD, and the game volume. Changes save locally and push
+// the whole LocalSettings object to the overlay live (which applies HUD + volume).
+function LocalTab() {
+  const [local, setLocal] = useState<LocalSettings>(DEFAULT_LOCAL);
+  useEffect(() => {
+    loadLocal().then(setLocal).catch(() => {});
+  }, []);
+  const update = async (patch: Partial<LocalSettings>) => {
+    const next = { ...local, ...patch };
+    setLocal(next);
+    await saveLocal(next).catch(() => {});
+    await emitTo("overlay", "local-settings", next).catch(() => {});
+  };
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="text-sm text-white/70">Ajustes solo de esta computadora</div>
+      <AutostartToggle />
+      <button
+        onClick={() => update({ showStats: !local.showStats })}
+        className="flex items-center justify-between gap-3 w-full text-sm py-1"
+      >
+        <span className="flex flex-col items-start">
+          <span>Mostrar FPS y latencia</span>
+          <span className="text-xs text-white/40 text-left">
+            Un recuadro con los cuadros por segundo y el ping al servidor.
+          </span>
+        </span>
+        <span
+          className={`shrink-0 w-11 h-6 rounded-full relative transition ${
+            local.showStats ? "bg-bichito-accent" : "bg-white/15"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${
+              local.showStats ? "left-[22px]" : "left-0.5"
+            }`}
+          />
+        </span>
+      </button>
+      <label className="flex flex-col gap-1">
+        <div className="flex justify-between text-sm">
+          <span>Volumen del juego</span>
+          <span className="text-white/50">{Math.round(local.volume * 100)}%</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={local.volume}
+          onChange={(e) => update({ volume: parseFloat(e.target.value) })}
+          className="w-full accent-bichito-accent"
+        />
+        <div className="text-xs text-white/40">Sonidos de espadazos, golpes y choques.</div>
+      </label>
+    </div>
+  );
+}
+
 export function App() {
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [tab, setTab] = useState<"sala" | "local">("sala");
 
   useEffect(() => {
     loadProfile().then(setProfile);
@@ -113,16 +182,29 @@ export function App() {
         </div>
       </div>
 
-      <div className="border-t border-white/10 pt-4">
-        <ConfigPanel />
-      </div>
+      {/* update banner sits above the tabs so it's never hidden behind one */}
+      <Updater />
 
+      {/* two scopes: "Sala" = shared with the group, "Local" = only this device */}
       <div className="border-t border-white/10 pt-4">
-        <AutostartToggle />
-      </div>
+        <div className="flex gap-1 p-1 rounded-xl bg-black/25 mb-4">
+          {([
+            ["sala", "Sala (compartido)"],
+            ["local", "Este dispositivo"],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              className={`flex-1 py-1.5 rounded-lg text-sm transition ${
+                tab === id ? "bg-bichito-accent/25 text-white" : "text-white/55 hover:text-white/80"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
 
-      <div className="border-t border-white/10 pt-4">
-        <Updater />
+        {tab === "sala" ? <ConfigPanel /> : <LocalTab />}
       </div>
 
       <button

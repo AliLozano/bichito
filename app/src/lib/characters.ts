@@ -4,7 +4,7 @@
 
 export type CharacterId = "gato" | "rana" | "fantasma" | "robotito";
 
-export type Pose = "idle" | "walk" | "jump" | "fall" | "hang" | "sleep";
+export type Pose = "idle" | "walk" | "jump" | "fall" | "hang" | "sleep" | "crouch";
 
 export interface Character {
   id: CharacterId;

@@ -38,6 +38,17 @@ pub struct PresenceState {
     dnd_gen: AtomicU64,
     /// Guards against starting the task twice.
     started: AtomicBool,
+    /// While true, send a fast WS ping every ~1.5s and emit the measured round-trip
+    /// as `rtt` (drives the optional overlay FPS/latency HUD).
+    pinging: AtomicBool,
+}
+
+/// Wall-clock millis since the Unix epoch (used to stamp ping payloads for RTT).
+fn epoch_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
 }
 
 fn server_url() -> String {
@@ -141,6 +152,7 @@ pub fn net_snap(
     flip: bool,
     frame: i64,
     grip: f64,
+    health: f64,
     target: String,
 ) {
     send(
@@ -159,6 +171,7 @@ pub fn net_snap(
                 flip,
                 frame,
                 grip,
+                health,
                 target,
             },
         },
@@ -175,6 +188,13 @@ pub fn net_cursor(app: AppHandle, x: f64, y: f64, active: bool) {
 #[tauri::command]
 pub fn net_bump(app: AppHandle, owner: String, vx: f64, vy: f64) {
     send(&app, ClientMsg::Bump { owner, vx, vy });
+}
+
+/// Send an opaque minigame event — relayed verbatim to peers. The shape of `data`
+/// is defined entirely on the JS side (see src/game/net.ts).
+#[tauri::command]
+pub fn net_game(app: AppHandle, data: serde_json::Value) {
+    send(&app, ClientMsg::Game { data });
 }
 
 /// Called by the overlay once it finds a newer version -> show a tray item.
@@ -195,6 +215,18 @@ pub fn get_config(app: AppHandle) -> Option<WorldConfig> {
 pub fn net_config(app: AppHandle, config: WorldConfig) {
     *app.state::<PresenceState>().config.lock().unwrap() = Some(config.clone());
     send(&app, ClientMsg::Config { config });
+}
+
+/// Start/stop the fast latency probe (the overlay calls these when its FPS/latency
+/// HUD is toggled). While on, `rtt` events are emitted ~every 1.5s.
+#[tauri::command]
+pub fn net_ping_start(app: AppHandle) {
+    app.state::<PresenceState>().pinging.store(true, Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub fn net_ping_stop(app: AppHandle) {
+    app.state::<PresenceState>().pinging.store(false, Ordering::Relaxed);
 }
 
 /// Whether Do Not Disturb is currently on.
@@ -262,6 +294,11 @@ async fn run(
                 // reconnect) if the network drops without a clean close.
                 let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
                 keepalive.tick().await; // consume the immediate first tick
+                // fast latency probe: only actually sends while `pinging` is on. The
+                // server echoes a WS Ping's payload back as a Pong (see server main.rs),
+                // so we stamp the payload with the send time and measure on Pong.
+                let mut statsping = tokio::time::interval(std::time::Duration::from_millis(1500));
+                statsping.tick().await;
 
                 loop {
                     tokio::select! {
@@ -279,13 +316,29 @@ async fn run(
                         },
                         frame = read.next() => match frame {
                             Some(Ok(Message::Text(t))) => handle_server(&app, &t),
+                            Some(Ok(Message::Pong(p))) => {
+                                // our stats-ping echoed back — payload holds the send time
+                                if p.len() == 8 {
+                                    let t = f64::from_le_bytes(p.try_into().unwrap());
+                                    let rtt = (epoch_ms() - t).max(0.0);
+                                    let _ = app.emit_to("overlay", "rtt", serde_json::json!({ "ms": rtt }));
+                                }
+                            }
                             Some(Ok(Message::Close(_))) | None => break,
                             Some(Err(_)) => break,
-                            Some(Ok(_)) => {} // ping/pong/binary — ignore
+                            Some(Ok(_)) => {} // other ping/binary — ignore
                         },
                         _ = keepalive.tick() => {
                             if write.send(Message::Ping(Vec::new())).await.is_err() {
                                 break; // reconnect
+                            }
+                        }
+                        _ = statsping.tick() => {
+                            if app.state::<PresenceState>().pinging.load(Ordering::Relaxed) {
+                                let payload = epoch_ms().to_le_bytes().to_vec();
+                                if write.send(Message::Ping(payload)).await.is_err() {
+                                    break; // reconnect
+                                }
                             }
                         }
                         // periodically re-check DND so toggling it disconnects promptly
@@ -346,6 +399,13 @@ fn handle_server(app: &AppHandle, text: &str) {
                 "overlay",
                 "peer-bump",
                 serde_json::json!({ "owner": owner, "vx": vx, "vy": vy }),
+            );
+        }
+        ServerMsg::PeerGame { from, data } => {
+            let _ = app.emit_to(
+                "overlay",
+                "peer-game",
+                serde_json::json!({ "from": from, "data": data }),
             );
         }
     }

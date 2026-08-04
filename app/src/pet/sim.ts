@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
 import { type CharacterId, type Pose } from "../lib/characters";
-import { DEFAULT_CONFIG, type WorldConfig } from "../lib/store";
+import { DEFAULT_CONFIG, type WorldConfig } from "../lib/world-config";
+import type { Env } from "./env";
 
 // The shared "pet world". Everything is NORMALIZED (0..1). A pet I control is
 // simulated locally at 60fps and broadcast ~20Hz; pets I don't control are
@@ -20,7 +20,8 @@ export type PetState =
   | "oncursor"
   | "dizzy"
   | "flee"
-  | "gone";
+  | "gone"
+  | "play"; // player-controlled (minigame): arrows to move/jump/crouch
 
 function randIdle(exclude?: PetState): IdleState {
   const opts = IDLE_STATES.filter((s) => s !== exclude);
@@ -41,6 +42,9 @@ export interface Pet {
   frame: number;
   spin: number;
   grip: number;
+  health: number; // 0..1 — minigame vitality (the green bar during a match). Lives on
+  // the pet so it rides the snapshot and both players see the same bar. Full outside
+  // matches; the defender decrements its own and it broadcasts.
   target: string; // oncursor: whose cursor
   // local-only bookkeeping
   t: number;
@@ -72,13 +76,30 @@ export interface RemoteCursor {
   lastSeen: number;
 }
 
+// The minigame plugs into the pet world through this hook (implemented by
+// src/game/engine.ts). The Sim owns the loop + transport and simply delegates a
+// "play"-state pet's motion here; all game rules/state live behind it. Keeping the
+// interface in the Sim (not the game module) means the Sim never imports the game.
+export interface PetController {
+  drivePet(p: Pet, dt: number, now: number): void; // motion of MY controlled pet
+  predictPet(p: Pet, dt: number): void; // dead-reckon a peer's controlled pet
+  stepWorld(dt: number, now: number): void; // advance game entities (nail swings, …)
+  readonly armed?: boolean; // my pet is placed & napping, focused, waiting for the first key
+  // MY pet just settled from a GENTLE placement (a soft drop / slow move / plain
+  // click) — "arm" the minigame: keep sleeping + take keyboard focus, but don't start
+  // playing until the first key. A hard throw skips this.
+  armOnPlace?(p: Pet): void;
+}
+
 // physics in normalized units (y grows downward). aspect-agnostic on purpose.
 const G = 2.6; // gravity /s^2
 const FLOOR_MARGIN = 0.2; // gap below the sprite, as a fraction of the sprite size (px-consistent on any screen)
 const WALK = 0.05;
 export const SPRITE_PX = 56; // pet sprite size in CSS px (shared with PetView)
 export const COLLIDE_R = SPRITE_PX * 0.45; // pet↔pet collision radius in px (isotropic circle)
-const SNAP_MS = 45;
+const SNAP_MS = 45; // normal broadcast interval (~22Hz) — plenty for ambient pets
+const SNAP_MS_MATCH = 20; // while a pet is in a match ("play"), broadcast ~50Hz so
+// the fast dueling motion (jump/crouch/dodge) stays crisp for the opponent
 const CURSOR_MS = 45;
 const DIZZY = 1.4; // dazed pause after landing — a window to grab it before it flees
 const GENTLE_DIST = 0.16; // a released pet that traveled less than this settles to sleep in place (no dizzy/flee)
@@ -107,29 +128,51 @@ export class Sim {
   cursors = new Map<string, RemoteCursor>();
   myCursor = { x: 0.5, y: 0.5 };
   charging = false; // mouse held down over a pet
+  now = 0; // latest loop timestamp (perf-ms), so event handlers can stamp claims
+  // when I last CLAIMED each pet (grab/leap/auto). A fresh claim is protected from the
+  // owner's in-flight snapshots for a grace window (see applySnap) so grabbing someone
+  // else's pet can't be ripped back by their still-propagating "I own it" snapshots.
+  private claimedAt = new Map<string, number>();
   config: WorldConfig = { ...DEFAULT_CONFIG }; // shared group vibe (synced)
+  // the minigame plugs in here (set by the overlay). The Sim delegates "play"-state
+  // pet motion + game-entity stepping to it, but knows nothing about game rules.
+  game?: PetController;
+
+  // viewport (px) + transport (the net_* wire) are injected so the SAME Sim runs in
+  // the browser (window + Tauri invoke) AND headless in the bot (fixed screen + WS).
+  constructor(public readonly env: Env) {}
 
   setConfig(c: WorldConfig) {
     this.config = c;
+  }
+
+  // Record that I just took control of `owner` (grab/leap/auto/bot-reclaim). Protects
+  // the fresh claim from the previous controller's in-flight snapshots for a grace
+  // window (see applySnap). Public so the bot's reclaim marks itself the same way.
+  noteClaim(owner: string) {
+    this.claimedAt.set(owner, this.now);
   }
 
   // Floor line (normalized y) so the sprite's BOTTOM sits FLOOR_MARGIN*sprite above
   // the screen bottom — a pixel-consistent gap on any resolution (sprite center is
   // half a sprite above its bottom, plus the margin).
   floor(): number {
-    const H = window.innerHeight || 1;
+    const H = this.env.vh();
     return 1 - (SPRITE_PX * (0.5 + FLOOR_MARGIN)) / H;
   }
 
   // begin a rest cycle at the edge: cycles through random idle activities (sleeping,
   // coding, coffee, music…) instead of only sleeping. `wanderNext` is reused as the
   // current activity's duration while resting.
-  private startRest(p: Pet, first?: PetState) {
+  startRest(p: Pet, first?: PetState) {
     p.state = first ?? randIdle();
     p.wanderNext = rand(6, 14);
     p.restT = 0;
     p.t = 0;
     p.frameAcc = 0;
+    // NOTE: does NOT reset health — a wandering/idle pet calls this constantly, so
+    // healing here would out-heal a pester (health stuck near full). Health refills on
+    // respawn (gone -> walk) and on entering/leaving combat.
   }
 
   // deterministic sleeping slot so pets lie down side by side (ranked by owner id),
@@ -197,6 +240,7 @@ export class Sim {
       frame: 0,
       spin: 0,
       grip: 1,
+      health: 1,
       target: "",
       t: 0,
       restT: 0,
@@ -227,8 +271,19 @@ export class Sim {
     }
     // A pet I control is authoritative locally: a delayed snapshot from a former
     // controller (still in-flight during a handoff) must not clobber it. Control
-    // changes arrive via PeerClaim/onClaim, so once p.controller is me, ignore.
-    if (p.controller === this.me && s.controller !== this.me) return;
+    // changes arrive via PeerClaim/onClaim, so once p.controller is me, ignore —
+    // EXCEPT when the pet's own OWNER is driving it (s.controller === s.owner): the
+    // owner reclaiming its own pet is ground truth and must win, otherwise a stale
+    // claim of mine freezes their pet forever (it renders stuck in an idle activity,
+    // no health bar, while it actually fights on their side).
+    // BUT: if I *just* grabbed this pet, my Claim is still propagating; the owner's
+    // in-flight "I own it" snapshots would rip the fresh grab out of my hand (the
+    // intermittent "no puedo levantar la mascota del amigo"). Protect it briefly.
+    if (p.controller === this.me && s.controller !== this.me) {
+      const justGrabbed = now - (this.claimedAt.get(s.owner) ?? -Infinity) < 800;
+      const ownerReclaim = s.controller === s.owner && !justGrabbed;
+      if (!ownerReclaim) return; // keep my control (fresh grab, or a non-owner's stale snap)
+    }
     p.name = s.name;
     p.character = s.character;
     p.controller = s.controller;
@@ -240,6 +295,7 @@ export class Sim {
     p.flip = s.flip;
     p.frame = s.frame;
     p.grip = s.grip;
+    p.health = s.health ?? 1;
     p.target = s.target;
     p.lastSnap = now;
     // if a pet leapt onto MY cursor, I take control (only I know my cursor)
@@ -249,7 +305,8 @@ export class Sim {
       p.spd = 0;
       p.hold = 0;
       p.t = 0;
-      invoke("net_claim", { owner: p.owner }).catch(() => {});
+      this.claimedAt.set(p.owner, now);
+      this.env.transport.claim(p.owner);
     }
   }
 
@@ -295,8 +352,8 @@ export class Sim {
   // `radiusPx` lets callers use a tight radius for grabbing and a generous one
   // for arming click-capture (which needs margin to beat toggle latency).
   petAt(px: number, py: number, radiusPx: number = SPRITE_PX * 0.64): Pet | undefined {
-    const W = window.innerWidth || 1;
-    const H = window.innerHeight || 1;
+    const W = this.env.vw();
+    const H = this.env.vh();
     const cx = px * W;
     const cy = py * H;
     let best: Pet | undefined;
@@ -319,7 +376,8 @@ export class Sim {
     p.offY = p.y - this.myCursor.y;
     p.vx = 0;
     p.vy = 0;
-    invoke("net_claim", { owner: p.owner }).catch(() => {});
+    this.claimedAt.set(p.owner, this.now);
+    this.env.transport.claim(p.owner);
   }
 
   releaseHeld(p: Pet) {
@@ -363,15 +421,18 @@ export class Sim {
     p.pcx = NaN;
     p.spd = 0;
     p.t = 0;
-    invoke("net_claim", { owner: p.owner }).catch(() => {});
+    this.claimedAt.set(p.owner, this.now);
+    this.env.transport.claim(p.owner);
   }
 
   // --- main loop ----------------------------------------------------------
   step(dt: number, now: number) {
+    this.now = now;
     for (const p of this.pets.values()) {
-      if (p.controller === this.me) this.simulate(p, dt);
+      if (p.controller === this.me) this.simulate(p, dt, now);
       else this.predict(p, dt);
     }
+    this.game?.stepWorld(dt, now); // advance minigame entities (nail swings, …)
     this.collide(now, dt);
     this.tickCursor(now);
     this.broadcast(now);
@@ -380,7 +441,7 @@ export class Sim {
     for (const [id, c] of this.cursors) if (now - c.lastSeen > 1500) this.cursors.delete(id);
   }
 
-  private simulate(p: Pet, dt: number) {
+  private simulate(p: Pet, dt: number, now: number) {
     const FLOOR = this.floor();
     p.t += dt;
     switch (p.state) {
@@ -404,6 +465,10 @@ export class Sim {
         }
         break;
       }
+      case "play":
+        // player-controlled: motion + combat live in the minigame (src/game/engine.ts).
+        this.game?.drivePet(p, dt, now);
+        break;
       // resting: cycle random idle activities (sleeping / coding / coffee / music /
       // thinking). Each lasts `wanderNext` seconds; after the total rest budget
       // (config.sleepTime) it wakes and walks again.
@@ -413,6 +478,12 @@ export class Sim {
       case "music":
       case "thinking": {
         p.y = FLOOR;
+        // armed & waiting to fight: hold a steady nap (don't cycle to coding/coffee or
+        // wake) until the first key starts the match.
+        if (p.owner === this.me && this.game?.armed) {
+          p.frameAcc = 0;
+          break;
+        }
         p.restT += dt;
         p.frameAcc += dt;
         if (p.frameAcc > 0.6) {
@@ -436,7 +507,7 @@ export class Sim {
       case "held": {
         // less-intrusive mode: if you lift it more than a few sprite-heights above
         // the floor, it drops instead of going up (px-consistent on any screen).
-        const maxLift = (MAX_LIFT_SPRITES * SPRITE_PX) / (window.innerHeight || 1);
+        const maxLift = (MAX_LIFT_SPRITES * SPRITE_PX) / this.env.vh();
         if (!this.config.allowLeap && p.y < FLOOR - maxLift) {
           this.releaseHeld(p);
           break;
@@ -590,10 +661,14 @@ export class Sim {
           p.vy = 0;
           p.y = FLOOR;
           p.t = 0;
-          // a gentle placement settles into a rest cycle right here (starting asleep);
-          // a real throw gets dizzy and then runs off.
-          if (gentle) this.startRest(p, "sleeping");
-          else p.state = "dizzy";
+          // a gentle placement of a FRIEND's pet settles it to sleep. MINE instead goes
+          // combat-ready ("armed": stands holding its nail, keyboard focused, waiting for
+          // the first key). A plain click lands here too (~0 travel). A hard/high throw
+          // gets dizzy and runs off.
+          if (gentle) {
+            if (p.owner === this.me && this.game?.armOnPlace) this.game.armOnPlace(p);
+            else this.startRest(p, "sleeping");
+          } else p.state = "dizzy";
         }
         break;
       }
@@ -636,6 +711,7 @@ export class Sim {
           p.y = FLOOR;
           p.wanderNext = rand(0.2, 0.8);
           p.state = "walk";
+          p.health = 1; // respawn at full health
           p.t = 0;
         }
         break;
@@ -650,6 +726,9 @@ export class Sim {
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.spin += p.vx * dt * 90;
+    } else if (p.state === "play") {
+      // dead-reckon a player-controlled pet between snapshots (game owns the physics)
+      this.game?.predictPet(p, dt);
     } else if (
       p.state === "flee" ||
       p.state === "walk" ||
@@ -671,8 +750,8 @@ export class Sim {
     // detect in PIXELS so the collision zone is a real circle (normalized units are
     // aspect-distorted). Positions convert to px via the window; the bounce direction
     // stays normalized (velocities are normalized).
-    const W = window.innerWidth || 1;
-    const H = window.innerHeight || 1;
+    const W = this.env.vw();
+    const H = this.env.vh();
     for (const a of this.pets.values()) {
       if (a.controller !== this.me) continue;
       // a pet is a collider while thrown, held, or clinging to my cursor (oncursor)
@@ -709,7 +788,7 @@ export class Sim {
             b.t = 0;
             b.hitAt = now;
           } else {
-            invoke("net_bump", { owner: b.owner, vx: bvx, vy: bvy }).catch(() => {});
+            this.env.transport.bump(b.owner, bvx, bvy);
           }
           break;
         }
@@ -721,9 +800,11 @@ export class Sim {
     for (const p of this.pets.values()) {
       if (p.controller !== this.me) continue;
       const last = this.lastSnapSent.get(p.owner) ?? 0;
-      if (now - last < SNAP_MS) continue;
+      // a pet in a match broadcasts faster so the opponent sees crisp dueling motion
+      const interval = p.state === "play" ? SNAP_MS_MATCH : SNAP_MS;
+      if (now - last < interval) continue;
       this.lastSnapSent.set(p.owner, now);
-      invoke("net_snap", {
+      this.env.transport.snap({
         owner: p.owner,
         name: p.name,
         character: p.character,
@@ -736,8 +817,9 @@ export class Sim {
         flip: p.flip,
         frame: p.frame,
         grip: p.grip,
+        health: p.health,
         target: p.target,
-      }).catch(() => {});
+      });
     }
   }
 
@@ -745,9 +827,7 @@ export class Sim {
     if (now - this.lastCursorSent < CURSOR_MS) return;
     this.lastCursorSent = now;
     // visibility is decided by tickCursor (show/hide + 3s grace)
-    invoke("net_cursor", { x: this.myCursor.x, y: this.myCursor.y, active: this.cursorShown }).catch(
-      () => {}
-    );
+    this.env.transport.cursor(this.myCursor.x, this.myCursor.y, this.cursorShown);
   }
 
   pose(p: Pet): Pose {
@@ -755,6 +835,8 @@ export class Sim {
       case "walk":
       case "flee":
         return "walk";
+      case "play":
+        return p.y < this.floor() - 0.01 ? "jump" : "walk";
       case "leap":
         return p.lphase === "jump" ? "jump" : "walk";
       case "sleeping":

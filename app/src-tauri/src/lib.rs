@@ -95,16 +95,22 @@ pub fn run() {
             hide_main,
             cursor::cursor_poll_start,
             cursor::set_clickthrough,
+            cursor::game_focus,
+            cursor::game_arm,
+            cursor::dbg,
             presence::get_online,
             presence::get_world,
             presence::net_claim,
             presence::net_snap,
             presence::net_cursor,
             presence::net_bump,
+            presence::net_game,
             presence::get_config,
             presence::net_config,
             presence::get_dnd,
             presence::set_dnd,
+            presence::net_ping_start,
+            presence::net_ping_stop,
             presence::update_available
         ])
         .setup(|app| {

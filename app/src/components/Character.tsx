@@ -11,6 +11,7 @@ export function Character({
   flip = false,
   frame = 0,
   activity,
+  combat = false,
 }: {
   id: CharacterId;
   pose?: Pose;
@@ -18,13 +19,15 @@ export function Character({
   flip?: boolean;
   frame?: number; // 0/1 alternating for the walk cycle
   activity?: string; // idle activity prop drawn into the sprite: coding | coffee | music | thinking
+  combat?: boolean; // minigame attack mode: draw the nail (little sword) held out front
 }) {
   const c = getCharacter(id);
   const walking = pose === "walk";
   const step = walking ? (frame % 2 === 0 ? -2 : 2) : 0;
   const jump = pose === "jump";
+  const crouch = pose === "crouch";
   const armsUp = pose === "hang" || pose === "fall";
-  const bob = jump ? -2 : walking && frame % 2 === 0 ? 0.6 : 0;
+  const bob = crouch ? 3.5 : jump ? -2 : walking && frame % 2 === 0 ? 0.6 : 0;
   const OL = "rgba(0,0,0,0.45)"; // outline so it pops on any background
 
   return (
@@ -124,6 +127,21 @@ export function Character({
           <rect x="8.9" y="18.3" width="3.2" height="0.55" rx="0.27" fill="#fbbf24" opacity="0.85" />
           {/* keyboard base */}
           <path d="M6.2 20.1 h11.6 l1.1 1.6 h-13.8 z" fill="#334155" stroke={OL} strokeWidth="0.6" strokeLinejoin="round" />
+        </>
+      )}
+      {/* --- attack mode: the nail (a little sword) held out in the facing direction --- */}
+      {combat && (
+        <>
+          <rect x="18.4" y={12.2 + bob} width="1.6" height="3.6" rx="0.5" fill="#7c5b34" stroke={OL} strokeWidth="0.4" />
+          <rect x="17.6" y={11.9 + bob} width="3.2" height="1" rx="0.4" fill="#9ca3af" stroke={OL} strokeWidth="0.4" />
+          <path
+            d={`M18.6 ${11.7 + bob} L24.8 ${5.9 + bob} L25.6 ${6.9 + bob} L19.4 ${12.5 + bob} Z`}
+            fill="#eef2f7"
+            stroke={OL}
+            strokeWidth="0.4"
+            strokeLinejoin="round"
+          />
+          <circle cx="24.9" cy={6.1 + bob} r="0.5" fill="#ffffff" opacity="0.9" />
         </>
       )}
       {activity === "thinking" && (

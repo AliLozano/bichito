@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { loadConfig, saveConfig, DEFAULT_CONFIG, type WorldConfig } from "../lib/store";
@@ -53,31 +53,55 @@ function Row({
 
 export function ConfigPanel() {
   const [cfg, setCfg] = useState<WorldConfig>(DEFAULT_CONFIG);
-  const [dirty, setDirty] = useState(false);
+  const [status, setStatus] = useState<"saved" | "saving">("saved");
+  const latest = useRef<WorldConfig>(DEFAULT_CONFIG); // newest value for the debounced save
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pending = useRef(false); // a local edit is in flight (ignore our own echo)
 
   useEffect(() => {
     invoke<WorldConfig | null>("get_config")
-      .then((c) => setCfg(c ?? DEFAULT_CONFIG))
-      .catch(() => loadConfig().then(setCfg));
-    // reflect changes made by a friend (or by us, echoed back)
+      .then((c) => {
+        const v = c ?? DEFAULT_CONFIG;
+        setCfg(v);
+        latest.current = v;
+      })
+      .catch(() =>
+        loadConfig().then((v) => {
+          setCfg(v);
+          latest.current = v;
+        })
+      );
+    // reflect changes made by a friend. Ignore echoes while a local edit is in flight
+    // (net_config broadcasts to EVERYONE incl. us; applying our own echo mid-drag would
+    // revert the in-progress slider and can lose the newest change).
     const un = listen<WorldConfig>("config", (e) => {
+      if (pending.current) return;
       setCfg(e.payload);
-      setDirty(false);
+      latest.current = e.payload;
+      setStatus("saved");
     });
     return () => {
       un.then((f) => f());
+      if (timer.current) clearTimeout(timer.current);
     };
   }, []);
 
+  // any edit auto-saves + syncs to the group after a short debounce (no button).
   const set = (patch: Partial<WorldConfig>) => {
-    setCfg((c) => ({ ...c, ...patch }));
-    setDirty(true);
-  };
-
-  const apply = async () => {
-    await saveConfig(cfg);
-    await invoke("net_config", { config: cfg }).catch(() => {});
-    setDirty(false);
+    setCfg((c) => {
+      const next = { ...c, ...patch };
+      latest.current = next;
+      return next;
+    });
+    setStatus("saving");
+    pending.current = true;
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      await saveConfig(latest.current);
+      await invoke("net_config", { config: latest.current }).catch(() => {});
+      pending.current = false;
+      setStatus("saved");
+    }, 500);
   };
 
   return (
@@ -147,13 +171,9 @@ export function ConfigPanel() {
           />
         </span>
       </button>
-      <button
-        onClick={apply}
-        disabled={!dirty}
-        className="py-2 rounded-xl bg-bichito-accent/20 hover:bg-bichito-accent/30 disabled:opacity-40 disabled:cursor-default text-sm transition"
-      >
-        {dirty ? "Guardar y sincronizar con el grupo" : "Sincronizado ✓"}
-      </button>
+      <div className="text-xs text-white/40 text-center py-1">
+        {status === "saving" ? "Guardando y sincronizando…" : "Sincronizado con el grupo ✓"}
+      </div>
     </div>
   );
 }

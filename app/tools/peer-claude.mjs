@@ -20,6 +20,9 @@ const rand = (a, b) => a + Math.random() * (b - a);
 const now = () => Date.now();
 const IDLE = ["sleeping", "coding", "coffee", "music", "thinking"];
 const randIdle = (ex) => { const o = IDLE.filter((s) => s !== ex); return o[Math.floor(Math.random() * o.length)]; };
+// NOTE: does NOT reset health — a wandering/idle pet calls this constantly, and
+// resetting here would heal a pet faster than you can pester it (health stuck ~80%).
+// Health only refills on respawn (see the "gone" case).
 function startRest(p, first) { p.state = first ?? randIdle(); p.wanderNext = rand(6, 14); p.restT = 0; p.t = 0; p.frameAcc = 0; }
 const segDist = (px, py, x1, y1, x2, y2) => {
   const dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy;
@@ -33,7 +36,9 @@ const send = (o) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(o
 const log = (s) => console.log(`${new Date().toISOString().slice(11, 19)} ${s}`);
 
 const pets = new Map();        // owner -> pet
+let botStunUntil = 0;          // brief i-frames after the bot's pet takes a hit
 const cursors = new Map();     // id -> {x,y,active,lastSeen}
+const clampX = (v) => Math.max(0.03, Math.min(0.97, v));
 const myCursor = { x: 0.5, y: 0.45 };
 const lastSnapSent = new Map();
 let lastCursorSent = 0;
@@ -60,7 +65,7 @@ function sleepX(p) {
 function blank(owner, name, character, controller) {
   return {
     owner, name, character, controller, state: "walk",
-    x: 0.5, y: FLOOR, vx: 0, vy: 0, flip: false, frame: 0, spin: 0, grip: 1, target: "",
+    x: 0.5, y: FLOOR, vx: 0, vy: 0, flip: false, frame: 0, spin: 0, grip: 1, health: 1, target: "",
     t: 0, restT: 0, frameAcc: 0, hold: 0, offX: 0, offY: 0, wanderNext: rand(0.1, 0.9),
     pcx: NaN, pcy: NaN, spd: 0, lphase: "run",
   };
@@ -69,9 +74,13 @@ function blank(owner, name, character, controller) {
 function applySnap(s) {
   let p = pets.get(s.owner);
   if (!p) { p = blank(s.owner, s.name, s.character, s.controller); pets.set(s.owner, p); }
+  // I am AUTHORITATIVE for my own pet: never overwrite it from the server's echo
+  // (world broadcasts on every client connect/disconnect would otherwise reset my
+  // health/state to the server's stale value — the "vida no baja" bug).
+  if (s.owner === ME.id) return;
   Object.assign(p, {
     name: s.name, character: s.character, controller: s.controller, state: s.state,
-    x: s.x, y: s.y, vx: s.vx, vy: s.vy, flip: s.flip, frame: s.frame, grip: s.grip, target: s.target,
+    x: s.x, y: s.y, vx: s.vx, vy: s.vy, flip: s.flip, frame: s.frame, grip: s.grip, health: s.health ?? 1, target: s.target,
   });
   // a pet leapt onto MY cursor -> I take control
   if (p.state === "oncursor" && p.target === ME.id && p.controller !== ME.id) {
@@ -98,11 +107,47 @@ ws.on("message", (buf) => {
     case "peerClaim": { const p = pets.get(m.owner); if (p) p.controller = m.controller; break; }
     case "peerCursor": cursors.set(m.from, { x: m.x, y: m.y, active: m.active, lastSeen: now() }); break;
     case "peerBump": { const p = pets.get(m.owner); if (p && p.controller === ME.id) { p.state = "thrown"; p.vx = m.vx; p.vy = m.vy; p.t = 0; } break; }
+    case "peerGame": { // only care about being HIT — the bot is a passive punching bag
+      const d = m.data; if (!d) break;
+      if (d.kind === "hit" && d.target === ME.id) botTakeHit(d.damage, d.knockback, d.dir);
+      break;
+    }
   }
 });
 
+// The bot is a passive pet, NOT a controlled combatant: it never enters "play" (so no
+// sword, no health bar — you're pestering it, not dueling it). It just takes hits while
+// wandering: each shoves it sideways + drops hidden health; when depleted it stumbles
+// off (dizzy -> flee -> respawn). Only a social/wandering pet can be pestered.
+function botTakeHit(damage, _knockback, dir) {
+  const me = pets.get(ME.id);
+  if (!me || now() < botStunUntil) return;
+  // hittable while wandering/idle OR already staggered ("dizzy") — allowing re-hits
+  // during the brief stagger keeps damage accumulating. Ignore only when down/fleeing.
+  if (!["walk", "dizzy", ...IDLE].includes(me.state)) return;
+  // i-frames MUST be shorter than the attacker's swing cooldown (300ms) or a
+  // cooldown-cadence swing lands right at the window edge and gets dropped.
+  botStunUntil = now() + 150;
+  me.health = Math.max(0, (me.health ?? 1) - damage);
+  if (me.health <= 1e-6) me.health = 0; // snap float residue (0.2*5 != 0) so KO fires on time
+  me.x = clampX(me.x + dir * 0.05); // visible sideways shove
+  me.vx = 0; me.vy = 0; me.spin = 0; me.t = 0;
+  // KO -> long daze then FLEES ("se va"); a normal hit -> brief stagger then resumes.
+  me.state = "dizzy";
+  me.hurtDaze = me.health > 0;
+  log(`[claude] 🩸 me molestaste (vida ${Math.round((me.health ?? 0) * 100)}%)`);
+}
+
 function simulate(p, dt) {
   p.t += dt;
+  if (p.owner === ME.id && ["walk", ...IDLE].includes(p.state)) {
+    // brief flinch: hold still right after a hit so the shove + flash read clearly
+    if (now() < botStunUntil) { p.y = FLOOR; p.frameAcc = 0; return; }
+    // stand still (easy, stationary target) whenever a human is close by, so you can
+    // wail on it and watch its health bar instead of chasing a wanderer.
+    const near = [...pets.values()].some((q) => q.owner !== ME.id && q.state !== "gone" && Math.abs(q.x - p.x) < 0.18);
+    if (near) { p.y = FLOOR; p.frameAcc = 0; return; }
+  }
   switch (p.state) {
     case "walk": {
       const sleepy = p.t > config.walkTime;
@@ -187,7 +232,11 @@ function simulate(p, dt) {
     case "dizzy": {
       p.y = FLOOR;
       p.frameAcc += dt; if (p.frameAcc > 0.15) { p.frameAcc = 0; p.frame ^= 1; }
-      if (p.t > 1.4) { p.state = "flee"; p.wanderNext = p.x < 0.5 ? -0.1 : 1.1; p.t = 0; }
+      // a per-hit stagger (hurtDaze) is BRIEF -> back to walk fast so damage keeps
+      // accumulating (fixes "se queda caminando" without breaking the health drop).
+      if (p.hurtDaze && p.t > 0.3) { p.state = "walk"; p.hurtDaze = false; p.wanderNext = rand(0.1, 0.9); p.t = 0; break; }
+      // a real KO (or social throw) dazes a bit, then FLEES ("se va").
+      if (!p.hurtDaze && p.t > 1.2) { p.state = "flee"; p.wanderNext = p.x < 0.5 ? -0.1 : 1.1; p.t = 0; }
       break;
     }
     case "flee": {
@@ -198,9 +247,9 @@ function simulate(p, dt) {
       break;
     }
     case "gone": {
-      if (p.t > rand(4, 9)) {
+      if (p.t > rand(1.5, 3)) { // return quickly after fleeing (was 4-9s -> "second time" dead window)
         const left = Math.random() < 0.5;
-        p.x = left ? -0.05 : 1.05; p.y = FLOOR; p.wanderNext = rand(0.2, 0.8); p.state = "walk"; p.t = 0;
+        p.x = left ? -0.05 : 1.05; p.y = FLOOR; p.wanderNext = rand(0.2, 0.8); p.state = "walk"; p.health = 1; p.t = 0;
       }
       break;
     }
@@ -242,7 +291,7 @@ function broadcast() {
     lastSnapSent.set(p.owner, t);
     send({ type: "snap", snap: {
       owner: p.owner, name: p.name, character: p.character, controller: p.controller,
-      state: p.state, x: p.x, y: p.y, vx: p.vx, vy: p.vy, flip: p.flip, frame: p.frame, grip: p.grip, target: p.target,
+      state: p.state, x: p.x, y: p.y, vx: p.vx, vy: p.vy, flip: p.flip, frame: p.frame, grip: p.grip, health: p.health ?? 1, target: p.target,
     }});
   }
 }
@@ -294,19 +343,8 @@ setInterval(() => {
   } else if (cmd === "quit") { ws.close(); process.exit(0); }
 }, 150);
 
-// occasional random leap, at the group's configured frequency (0 = never)
-function jumpDelay() {
-  return config.jumpEvery > 0 ? config.jumpEvery * 1000 * (0.5 + Math.random()) : Infinity;
-}
-let nextLeapAt = now() + jumpDelay();
-setInterval(() => {
-  if (now() < nextLeapAt) return;
-  nextLeapAt = now() + jumpDelay();
-  const mine = pets.get(ME.id);
-  if (!mine || mine.state !== "walk") return;
-  const target = [...pets.values()].find((p) => p.owner !== ME.id && p.state !== "gone")?.owner;
-  if (target) { leap(target); log(`[claude] 🎲 salto random sobre tu cursor!`); }
-}, 1000);
+// No combat AI and NO auto-leap: an un-controlled pet just wanders (less intrusive).
+// It only leaps if a human explicitly triggers `throw` via the command file.
 
 ws.on("close", () => { log("[claude] desconectado"); process.exit(0); });
 ws.on("error", (e) => log(`[claude] error: ${e.message}`));

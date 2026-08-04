@@ -10,17 +10,23 @@ use axum::{
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 mod protocol;
 use protocol::{ClientMsg, PetSnap, ServerMsg, UserInfo, WorldConfig};
+
+// unique per-connection token, so a stale session can't tear down a newer one
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 struct Peer {
     name: String,
     character: String,
     tx: mpsc::UnboundedSender<Message>,
+    token: u64,          // which connection currently owns this id
+    kicked: Arc<Notify>, // notified when a newer connection takes over this id
 }
 
 type Registry = Arc<DashMap<String, Peer>>;
@@ -67,12 +73,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     });
 
     let mut my_id: Option<String> = None;
+    let my_token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    let kicked = Arc::new(Notify::new()); // fires if a newer connection takes over my id
     loop {
         tokio::select! {
             incoming = stream.next() => match incoming {
                 Some(Ok(Message::Text(t))) => {
                     if let Ok(msg) = serde_json::from_str::<ClientMsg>(&t) {
-                        handle_msg(&state, &mut my_id, &tx, msg);
+                        handle_msg(&state, &mut my_id, &tx, my_token, &kicked, msg);
                     }
                 }
                 Some(Ok(Message::Ping(p))) => {
@@ -82,24 +90,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 Some(Err(_)) => break,
                 Some(Ok(_)) => {}
             },
+            _ = kicked.notified() => break, // a newer session replaced me -> disconnect
             _ = &mut writer => break,
         }
     }
 
     if let Some(id) = my_id {
-        state.reg.remove(&id);
-        // remove this user's pet + hand back any pet they controlled to its owner
-        {
-            let mut pets = state.pets.lock().unwrap();
-            pets.remove(&id);
-            for snap in pets.values_mut() {
-                if snap.controller == id {
-                    snap.controller = snap.owner.clone();
+        // Only tear down if I'm STILL the registered session for this id. A newer
+        // connection (reconnect / duplicate) may have taken over — don't clobber it.
+        let removed = state.reg.remove_if(&id, |_, p| p.token == my_token).is_some();
+        if removed {
+            // remove this user's pet + hand back any pet they controlled to its owner
+            {
+                let mut pets = state.pets.lock().unwrap();
+                pets.remove(&id);
+                for snap in pets.values_mut() {
+                    if snap.controller == id {
+                        snap.controller = snap.owner.clone();
+                    }
                 }
             }
+            broadcast_presence(&state.reg);
+            broadcast_world(&state);
         }
-        broadcast_presence(&state.reg);
-        broadcast_world(&state);
     }
     writer.abort();
 }
@@ -115,13 +128,26 @@ fn handle_msg(
     state: &AppState,
     my_id: &mut Option<String>,
     tx: &mpsc::UnboundedSender<Message>,
+    token: u64,
+    kicked: &Arc<Notify>,
     msg: ClientMsg,
 ) {
     match msg {
         ClientMsg::Hello { id, name, character, config } => {
+            // single session per user id: kick any existing connection for this id so a
+            // stale/zombie socket can't linger and fight the new one over the same pet.
+            if let Some(old) = state.reg.get(&id) {
+                old.kicked.notify_one();
+            }
             state.reg.insert(
                 id.clone(),
-                Peer { name: name.clone(), character: character.clone(), tx: tx.clone() },
+                Peer {
+                    name: name.clone(),
+                    character: character.clone(),
+                    tx: tx.clone(),
+                    token,
+                    kicked: kicked.clone(),
+                },
             );
             *my_id = Some(id.clone());
             // first client to connect seeds the shared config; everyone adopts it
@@ -151,6 +177,7 @@ fn handle_msg(
                 flip: !from_left,
                 frame: 0,
                 grip: 1.0,
+                health: 1.0,
                 target: String::new(),
             });
             broadcast_presence(&state.reg);
@@ -201,6 +228,10 @@ fn handle_msg(
         ClientMsg::Bump { owner, vx, vy } => {
             let Some(me) = my_id.as_deref() else { return };
             relay_others(state, me, &ServerMsg::PeerBump { owner, vx, vy });
+        }
+        ClientMsg::Game { data } => {
+            let Some(me) = my_id.as_deref() else { return };
+            relay_others(state, me, &ServerMsg::PeerGame { from: me.to_string(), data });
         }
     }
 }

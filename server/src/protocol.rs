@@ -50,7 +50,13 @@ pub struct PetSnap {
     pub flip: bool,
     pub frame: i64,
     pub grip: f64,
+    #[serde(default = "full_health")]
+    pub health: f64,
     pub target: String,
+}
+
+fn full_health() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +94,13 @@ pub enum ClientMsg {
         vx: f64,
         vy: f64,
     },
+    /// Opaque minigame event, relayed verbatim to everyone else. The server never
+    /// inspects `data` — all game event kinds (bullet, hit, score, enemy, weapon…)
+    /// live entirely in the client. This keeps the wire protocol stable as the game
+    /// grows: new game features never require a server change.
+    Game {
+        data: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,4 +115,6 @@ pub enum ServerMsg {
     PeerSnap { snap: PetSnap },
     PeerCursor { from: String, x: f64, y: f64, active: bool },
     PeerBump { owner: String, vx: f64, vy: f64 },
+    /// A peer's opaque game event (see `ClientMsg::Game`), tagged with who sent it.
+    PeerGame { from: String, data: serde_json::Value },
 }

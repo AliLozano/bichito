@@ -1,5 +1,10 @@
 import { load, Store } from "@tauri-apps/plugin-store";
 import type { CharacterId } from "./characters";
+import { type WorldConfig, DEFAULT_CONFIG } from "./world-config";
+
+// Re-exported so existing imports (`from "../lib/store"`) keep working; the actual
+// definitions live in world-config.ts (Tauri-free, importable headless by the bot).
+export { type WorldConfig, DEFAULT_CONFIG };
 
 // Persisted user profile. Lives in the app's data dir via tauri-plugin-store.
 // `id` is a stable per-install UUID the Rust presence client reads to identify
@@ -16,24 +21,6 @@ const DEFAULT_PROFILE: Profile = {
   name: "",
   character: "gato",
   onboarded: false,
-};
-
-// Shared group "vibe" config. Stored locally; the first person to connect seeds
-// the group value and everyone syncs to it (see presence.rs / server).
-export interface WorldConfig {
-  walkTime: number; // seconds wandering before getting sleepy
-  sleepTime: number; // seconds asleep at the edge
-  jumpEvery: number; // avg seconds between random leaps (0 = never)
-  runSpeed: number; // flee/leap run speed (normalized/s)
-  allowLeap: boolean; // false = never leap onto cursors; released pets just fall (less intrusive)
-}
-
-export const DEFAULT_CONFIG: WorldConfig = {
-  walkTime: 25,
-  sleepTime: 25,
-  jumpEvery: 3600, // ~once an hour by default (configurable 1/min .. 1/hr .. never)
-  runSpeed: 0.26,
-  allowLeap: true,
 };
 
 // Cache the PROMISE, not the resolved store, so concurrent callers share one
@@ -72,5 +59,29 @@ export async function loadConfig(): Promise<WorldConfig> {
 export async function saveConfig(c: WorldConfig): Promise<void> {
   const s = await getStore();
   await s.set("config", c);
+  await s.save();
+}
+
+// Local (per-device) settings — NOT shared with the group, unlike WorldConfig.
+// This is the "Local" tab of the settings window.
+export interface LocalSettings {
+  showStats: boolean; // overlay HUD with FPS + latency (RTT) to the server
+  volume: number; // 0..1 master volume for minigame SFX
+}
+
+export const DEFAULT_LOCAL: LocalSettings = {
+  showStats: false,
+  volume: 0.6,
+};
+
+export async function loadLocal(): Promise<LocalSettings> {
+  const s = await getStore();
+  const saved = await s.get<LocalSettings>("local");
+  return { ...DEFAULT_LOCAL, ...(saved ?? {}) };
+}
+
+export async function saveLocal(v: LocalSettings): Promise<void> {
+  const s = await getStore();
+  await s.set("local", v);
   await s.save();
 }

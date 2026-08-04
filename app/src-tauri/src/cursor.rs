@@ -56,3 +56,31 @@ pub fn set_clickthrough(app: AppHandle, ignore: bool) {
         let _ = win.set_ignore_cursor_events(ignore);
     }
 }
+
+/// Enter keyboard control (minigame): the overlay captures the mouse and takes
+/// focus so it receives arrow/space keydown events.
+#[tauri::command]
+pub fn game_focus(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.set_ignore_cursor_events(false);
+        let _ = win.set_focus();
+    }
+}
+
+/// TEMP diagnostic: print an engine message to the dev terminal (tauri dev stdout).
+#[tauri::command]
+pub fn dbg(msg: String) {
+    eprintln!("[engine] {msg}");
+}
+
+/// "Arm" the minigame: take keyboard focus WITHOUT capturing the mouse (click-through
+/// stays on). The pet keeps sleeping and the cursor still passes through to the
+/// desktop; the next game keypress is what actually starts the match (via game_focus).
+/// ignore_cursor_events only affects mouse hit-testing, so keydown still reaches a key
+/// window — the clickthrough state is managed separately by the overlay loop.
+#[tauri::command]
+pub fn game_arm(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.set_focus();
+    }
+}

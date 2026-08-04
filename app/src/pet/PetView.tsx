@@ -48,26 +48,51 @@ function HitDebug({ px, py }: { px: number; py: number }) {
   );
 }
 
-export function PetView({ pet, sim, mine }: { pet: Pet; sim: Sim; mine: boolean }) {
+export function PetView({
+  pet,
+  sim,
+  mine,
+  flash = false,
+  charge = 0,
+  duel = false,
+}: {
+  pet: Pet;
+  sim: Sim;
+  mine: boolean;
+  flash?: boolean; // just hit in the minigame -> hit flash (game-owned, passed in)
+  charge?: number; // 0..1 Nail-Art charge on MY pet -> glow (game-owned)
+  duel?: boolean; // ≥2 pets in a match -> show health bars (hidden when playing solo)
+}) {
   if (pet.state === "gone") return null;
   const px = pet.x * window.innerWidth;
   const py = pet.y * window.innerHeight;
   const pose = sim.pose(pet);
-  // thrown pets tumble; held/oncursor keep their fall angle via a gentle sway
+  // "dazed" = the DIZZY state (knocked out of health / thrown), NOT every hit. It rocks
+  // the sprite ±10° so it clearly reads as stunned. A per-hit flash is handled separately
+  // (💥 + brightness). Wall clock (not pet.t, which resets each frame) so it animates.
+  const dazed = pet.state === "dizzy";
+  // thrown pets tumble; dazed rocks ±45°; held/oncursor keep their fall angle via a sway
   const rot =
     pet.state === "thrown"
       ? pet.spin
-      : pet.state === "dizzy"
-      ? Math.sin(pet.t * 16) * 14 // dazed wobble — "grab me!"
+      : dazed
+      ? Math.sin(performance.now() * 0.02) * 10
       : pet.state === "held" || pet.state === "oncursor"
       ? Math.sin(pet.t * 8) * 6
       : 0;
   const onCursor = pet.state === "oncursor";
+  const inMatch = pet.state === "play";
+  const hitFlash = flash; // just shot in the minigame (computed by the game engine)
+  // the green bar doubles as grip (while clinging to a cursor) and health. Health shows
+  // during a real duel (≥2 fighters), OR whenever a pet is hurt (health < full) so you
+  // SEE damage when pestering a passive pet — it hides again once it heals/respawns.
+  const showBar = onCursor || (inMatch && duel) || pet.health < 0.999;
+  const barLevel = onCursor ? pet.grip : pet.health;
 
   return (
     <>
       {(DEBUG_HIT || DEBUG_COLLISION) && <HitDebug px={px} py={py} />}
-      {onCursor && <GripMeter level={pet.grip} x={px} y={py + SIZE * 0.6} />}
+      {showBar && <GripMeter level={barLevel} x={px} y={py + SIZE * 0.6} />}
       <div
         style={{
           position: "fixed",
@@ -77,9 +102,40 @@ export function PetView({ pet, sim, mine }: { pet: Pet; sim: Sim; mine: boolean 
           height: SIZE,
           pointerEvents: "none",
           transform: `rotate(${rot}deg)`,
-          filter: "drop-shadow(0 2px 2px rgba(0,0,0,0.35))",
+          filter: hitFlash
+            ? "drop-shadow(0 0 6px rgba(248,113,113,0.95)) brightness(1.7)"
+            : "drop-shadow(0 2px 2px rgba(0,0,0,0.35))",
         }}
       >
+        {hitFlash && (
+          <div
+            style={{
+              position: "absolute",
+              top: -8,
+              left: "50%",
+              transform: `translateX(-50%) rotate(${-rot}deg)`,
+              fontSize: 18,
+              pointerEvents: "none",
+            }}
+          >
+            💥
+          </div>
+        )}
+        {charge > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              inset: -SIZE * 0.15,
+              borderRadius: "50%",
+              boxShadow: `0 0 ${8 + charge * 18}px ${2 + charge * 6}px rgba(186,230,253,${
+                0.2 + charge * 0.5
+              })`,
+              background:
+                charge >= 1 ? "radial-gradient(circle, rgba(255,255,255,0.28), transparent 70%)" : undefined,
+              pointerEvents: "none",
+            }}
+          />
+        )}
         <PetLabel
           name={pet.name}
           color={mine ? "rgba(124,58,237,0.92)" : "rgba(244,114,182,0.9)"}
@@ -118,6 +174,7 @@ export function PetView({ pet, sim, mine }: { pet: Pet; sim: Sim; mine: boolean 
           size={SIZE}
           flip={pet.flip}
           frame={pet.frame}
+          combat={inMatch}
           activity={SVG_ACTIVITIES.includes(pet.state) ? pet.state : undefined}
         />
       </div>
