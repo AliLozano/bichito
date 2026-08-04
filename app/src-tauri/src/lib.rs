@@ -6,7 +6,7 @@ use presence::PresenceState;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    Manager, WebviewWindow,
+    Manager, WebviewWindow, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt;
 
@@ -88,6 +88,19 @@ pub fn run() {
         // Auto-update: check a signed manifest on GitHub Releases, download + install.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // The settings window must PERSIST: closing it (red button / Cmd+W / JS close)
+        // would DESTROY it, and then "Preferencias" could never reopen it (show_main's
+        // get_webview_window("main") returns None -> silent no-op — the "ya no vuelve a
+        // aparecer" bug). Intercept the close, HIDE instead, and drop back to tray-only.
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    set_dock(window.app_handle(), false);
+                }
+            }
+        })
         .manage(PresenceState::default())
         .manage(cursor::GrabState::default())
         .invoke_handler(tauri::generate_handler![
