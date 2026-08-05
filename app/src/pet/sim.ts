@@ -105,6 +105,11 @@ const DIZZY = 1.4; // dazed pause after landing — a window to grab it before i
 const GENTLE_DIST = 0.16; // a released pet that traveled less than this settles to sleep in place (no dizzy/flee)
 const MAX_LIFT_SPRITES = 4; // when leaping is off, a held pet lifted more than this many sprite-heights above the floor auto-drops
 const MAX_THROW = 1.6; // cap on throw speed (norm/s) — a hard flick can't fling it infinitely fast
+// Below this release speed (norm/s) a let-go counts as a GENTLE PLACEMENT: it drops in
+// place (velocity zeroed) so it settles + "arms" for combat. Only a firmer flick above
+// this keeps its (smoothed) throw momentum and arcs. Without this, the smoothed throw
+// velocity drifted gentle placements past GENTLE_DIST -> dizzy -> couldn't enter combat.
+const GENTLE_RELEASE_SPEED = 0.6;
 
 // shortest distance from point (px,py) to segment (x1,y1)-(x2,y2) — for swept collision
 function segDist(px: number, py: number, x1: number, y1: number, x2: number, y2: number) {
@@ -382,18 +387,17 @@ export class Sim {
 
   releaseHeld(p: Pet) {
     if (p.state !== "held") return;
-    if (!this.config.allowLeap) {
-      // less-intrusive mode: no throw — just drop it straight down
+    const sp = Math.hypot(p.vx, p.vy);
+    if (!this.config.allowLeap || sp < GENTLE_RELEASE_SPEED) {
+      // less-intrusive mode OR a gentle placement (slow release): drop in place so it
+      // settles + arms, instead of drifting on the smoothed throw velocity.
       p.vx = 0;
       p.vy = 0;
-    } else {
+    } else if (sp > MAX_THROW) {
       // the fling inherits the cursor's speed — cap it so a hard flick can't launch
       // it at "infinite" speed (which also causes it to tunnel through collisions).
-      const sp = Math.hypot(p.vx, p.vy);
-      if (sp > MAX_THROW) {
-        p.vx = (p.vx / sp) * MAX_THROW;
-        p.vy = (p.vy / sp) * MAX_THROW;
-      }
+      p.vx = (p.vx / sp) * MAX_THROW;
+      p.vy = (p.vy / sp) * MAX_THROW;
     }
     // eligible to settle-and-sleep if it lands close to here (a gentle placement)
     p.placed = true;
