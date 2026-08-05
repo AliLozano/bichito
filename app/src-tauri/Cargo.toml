@@ -1,6 +1,6 @@
 [package]
 name = "bichito"
-version = "0.4.4"
+version = "0.4.5"
 description = "bichito - a tiny desktop pet that jumps on your friends"
 authors = ["Ali Lozano"]
 edition = "2021"

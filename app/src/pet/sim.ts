@@ -812,8 +812,12 @@ export class Sim {
     const H = this.env.vh();
     for (const a of this.pets.values()) {
       if (a.controller !== this.me) continue;
-      // a pet is a collider while thrown, held, or clinging to my cursor (oncursor)
-      const moving = a.state === "thrown" || a.state === "held" || a.state === "oncursor";
+      // A pet collides while THROWN or clinging to my cursor (oncursor). A HELD pet is
+      // intentionally NOT a collider: it's in my hand, so it must pass cleanly through
+      // other pets — otherwise grabbing one that's touching a neighbor (pets sleep lined
+      // up side-by-side!) instantly knocks it out of my grip into "thrown"/"dizzy", so it
+      // snaps back and can't be dragged (the "se bloquea al arrastrar" bug).
+      const moving = a.state === "thrown" || a.state === "oncursor";
       if (!moving) continue;
       if (now - a.hitAt < 250) continue;
       // where a was last frame — check the whole swept segment, not just the
