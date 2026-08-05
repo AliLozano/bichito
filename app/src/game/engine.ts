@@ -36,11 +36,19 @@ export class GameEngine implements PetController {
     return this.controlling;
   }
 
-  // whether to flash a pet: my own pet while stunned, or any pet I just hit
+  // whether to flash a pet: my own pet while stunned, or any pet observed taking damage
   isStunned(owner: string, now: number): boolean {
     const ps = this.players.get(owner);
     if (ps && now < ps.stunUntil) return true;
     return now < (this.flashUntil.get(owner) ?? 0);
+  }
+
+  // A pet really took damage (its health dropped on an incoming snapshot). This is the
+  // ONLY place peer hit-feedback fires, so the flash + sound are always in lockstep with
+  // actual damage — no more "se ve el golpe pero no baja la vida".
+  onDamaged(owner: string, now: number) {
+    this.flashUntil.set(owner, now + GAME.stunMs);
+    sfx.hit();
   }
 
   // 0..1 nail-art charge progress for MY pet (drives the glow in PetView)
@@ -360,8 +368,8 @@ export class GameEngine implements PetController {
           s.hitDone = true;
           const dir = q.x < myPet.x ? -1 : 1; // shove the victim away from me
           this.sim.env.transport.game({ kind: "hit", target: q.owner, damage: s.damage, knockback: s.knockback, dir });
-          this.flashUntil.set(q.owner, now + GAME.stunMs); // local hit-flash on the victim
-          sfx.hit();
+          // NOTE: no optimistic flash/sound here — feedback fires when the victim's health
+          // actually drops (Sim.applySnap -> onDamaged), so a "hit" can't show without damage.
           // attacker pogo: a connecting down-swing while airborne bounces me up
           if (s.dir === "down" && myPet.y < this.sim.floor() - 0.02) myPet.vy = -this.pogoVel(H);
           break;

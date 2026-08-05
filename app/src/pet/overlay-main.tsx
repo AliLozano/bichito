@@ -56,6 +56,7 @@ sim.game = game;
 function Overlay() {
   const [me, setMe] = useState<Profile | null>(null);
   const [showStats, setShowStats] = useState(false);
+  const [hideGhosts, setHideGhosts] = useState(false); // hide friends' ghost cursors (local pref)
   const [, force] = useState(0);
   // local diagnostics (this device only): smoothed render FPS + last measured RTT.
   const stats = useRef({ fps: 0, rtt: -1 });
@@ -93,6 +94,7 @@ function Overlay() {
       applyStats(l.showStats);
       setVolume(l.volume);
       autoUpdate = l.autoUpdate;
+      setHideGhosts(l.hideGhostCursors);
     });
 
     let profileReady = false;
@@ -175,6 +177,7 @@ function Overlay() {
         applyStats(e.payload.showStats);
         setVolume(e.payload.volume);
         autoUpdate = e.payload.autoUpdate;
+        setHideGhosts(e.payload.hideGhostCursors);
       }),
       listen<{ target: string }>("leap", (e) => sim.leap(e.payload.target)),
       listen<WorldConfig>("config", (e) => sim.setConfig(e.payload)),
@@ -331,30 +334,24 @@ function Overlay() {
   return (
     <div style={{ position: "fixed", inset: 0, cursor: "default" }}>
       {showStats && <StatsHud fps={stats.current.fps} rtt={stats.current.rtt} />}
-      {(() => {
-        // health bars only during a real duel (≥2 pets in a match)
-        const duel = [...sim.pets.values()].filter((p) => p.state === "play").length >= 2;
-        return [...sim.pets.values()].map((p) => (
-          <PetView
-            key={"pet:" + p.owner}
-            pet={p}
-            sim={sim}
-            mine={p.owner === me.id}
-            flash={game.isStunned(p.owner, performance.now())}
-            charge={p.owner === me.id ? game.chargeLevel(performance.now()) : 0}
-            duel={duel}
-            avatar={avatars.current.get(p.owner)}
-          />
-        ));
-      })()}
+      {[...sim.pets.values()].map((p) => (
+        <PetView
+          key={"pet:" + p.owner}
+          pet={p}
+          sim={sim}
+          mine={p.owner === me.id}
+          flash={game.isStunned(p.owner, performance.now())}
+          charge={p.owner === me.id ? game.chargeLevel(performance.now()) : 0}
+          avatar={avatars.current.get(p.owner)}
+        />
+      ))}
       {game.slashes.map((s) => (
         <SlashView key={"s:" + s.id} slash={s} />
       ))}
-      {[...sim.cursors.entries()]
-        .filter(([id]) => id !== me.id)
-        .map(([id, c]) => (
-          <CursorGhost key={"cur:" + id} cursor={c} />
-        ))}
+      {!hideGhosts &&
+        [...sim.cursors.entries()]
+          .filter(([id]) => id !== me.id)
+          .map(([id, c]) => <CursorGhost key={"cur:" + id} cursor={c} />)}
     </div>
   );
 }

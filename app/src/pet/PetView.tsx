@@ -55,7 +55,6 @@ export function PetView({
   mine,
   flash = false,
   charge = 0,
-  duel = false,
   avatar,
 }: {
   pet: Pet;
@@ -63,7 +62,6 @@ export function PetView({
   mine: boolean;
   flash?: boolean; // just hit in the minigame -> hit flash (game-owned, passed in)
   charge?: number; // 0..1 Nail-Art charge on MY pet -> glow (game-owned)
-  duel?: boolean; // ≥2 pets in a match -> show health bars (hidden when playing solo)
   avatar?: Avatar; // custom user skin for this pet's owner (else built-in critter)
 }) {
   if (pet.state === "gone") return null;
@@ -87,9 +85,9 @@ export function PetView({
   const inMatch = pet.state === "play";
   const hitFlash = flash; // just shot in the minigame (computed by the game engine)
   // the green bar doubles as grip (while clinging to a cursor) and health. Health shows
-  // during a real duel (≥2 fighters), OR whenever a pet is hurt (health < full) so you
-  // SEE damage when pestering a passive pet — it hides again once it heals/respawns.
-  const showBar = onCursor || (inMatch && duel) || pet.health < 0.999;
+  // while a pet is in a match (holding its nail), OR whenever it's hurt (health < full)
+  // so you SEE damage even when pestering an idle pet — it hides once it heals/respawns.
+  const showBar = onCursor || inMatch || pet.health < 0.999;
   const barLevel = onCursor ? pet.grip : pet.health;
 
   return (

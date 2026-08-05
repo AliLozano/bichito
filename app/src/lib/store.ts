@@ -67,12 +67,14 @@ export interface LocalSettings {
   showStats: boolean; // overlay HUD with FPS + latency (RTT) to the server
   volume: number; // 0..1 master volume for minigame SFX
   autoUpdate: boolean; // check periodically and install new versions in the background
+  hideGhostCursors: boolean; // don't render friends' ghost cursors on MY screen
 }
 
 export const DEFAULT_LOCAL: LocalSettings = {
   showStats: false,
   volume: 0.6,
   autoUpdate: true, // on by default — the pet quietly keeps itself up to date
+  hideGhostCursors: false,
 };
 
 export async function loadLocal(): Promise<LocalSettings> {

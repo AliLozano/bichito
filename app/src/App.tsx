@@ -97,6 +97,28 @@ function LocalTab() {
         </span>
       </button>
       <button
+        onClick={() => update({ hideGhostCursors: !local.hideGhostCursors })}
+        className="flex items-center justify-between gap-3 w-full text-sm py-1"
+      >
+        <span className="flex flex-col items-start">
+          <span>Ocultar cursores de amigos</span>
+          <span className="text-xs text-white/40 text-left">
+            No mostrar el "mouse fantasma" de otros en tu pantalla.
+          </span>
+        </span>
+        <span
+          className={`shrink-0 w-11 h-6 rounded-full relative transition ${
+            local.hideGhostCursors ? "bg-bichito-accent" : "bg-white/15"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${
+              local.hideGhostCursors ? "left-[22px]" : "left-0.5"
+            }`}
+          />
+        </span>
+      </button>
+      <button
         onClick={() => update({ showStats: !local.showStats })}
         className="flex items-center justify-between gap-3 w-full text-sm py-1"
       >

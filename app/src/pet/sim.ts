@@ -89,7 +89,16 @@ export interface PetController {
   // click) — "arm" the minigame: keep sleeping + take keyboard focus, but don't start
   // playing until the first key. A hard throw skips this.
   armOnPlace?(p: Pet): void;
+  // a pet's health just DROPPED (observed on an incoming snapshot) — i.e. it really took
+  // damage. The single source of truth for hit feedback (flash + sound), so you can never
+  // see a "hit" without actual damage.
+  onDamaged?(owner: string, now: number): void;
 }
+
+// states where a HUMAN is actively manipulating a pet (dragging / on a cursor / mid-throw
+// / leaping). While in one of these, its owner must NOT reclaim it — that's normal social
+// play. Once it settles back to any other state, the owner takes it back (see step()).
+const MANIPULATED = new Set<string>(["held", "oncursor", "leap", "thrown"]);
 
 // physics in normalized units (y grows downward). aspect-agnostic on purpose.
 const G = 2.6; // gravity /s^2
@@ -300,7 +309,11 @@ export class Sim {
     p.flip = s.flip;
     p.frame = s.frame;
     p.grip = s.grip;
-    p.health = s.health ?? 1;
+    const newHealth = s.health ?? 1;
+    // health only ever DROPS on damage, so a decrease on the wire IS a real hit landing
+    // — the single trigger for hit feedback (flash + sound), consistent by construction.
+    if (newHealth < p.health - 1e-6) this.game?.onDamaged?.(s.owner, now);
+    p.health = newHealth;
     p.target = s.target;
     p.lastSnap = now;
     // if a pet leapt onto MY cursor, I take control (only I know my cursor)
@@ -432,6 +445,7 @@ export class Sim {
   // --- main loop ----------------------------------------------------------
   step(dt: number, now: number) {
     this.now = now;
+    this.reclaimOwnPet(now);
     for (const p of this.pets.values()) {
       if (p.controller === this.me) this.simulate(p, dt, now);
       else this.predict(p, dt);
@@ -443,6 +457,20 @@ export class Sim {
     this.broadcastCursor(now);
     // prune stale cursors
     for (const [id, c] of this.cursors) if (now - c.lastSeen > 1500) this.cursors.delete(id);
+  }
+
+  // I always own MY pet: if a friend grabbed/leapt it and then let it SETTLE (it's no
+  // longer held/on-a-cursor/mid-throw), take control back. Otherwise a stale handoff
+  // pins my pet on their client — the server rejects my snapshots (incl. health drops),
+  // which silently breaks combat ("le pego y no le baja la vida"). Skipped while it's
+  // actively being manipulated, so normal grab/throw social play still works.
+  private reclaimOwnPet(now: number) {
+    const mine = this.pets.get(this.me);
+    if (!mine || mine.controller === this.me || MANIPULATED.has(mine.state)) return;
+    if (now - (this.claimedAt.get(this.me) ?? -Infinity) < 500) return; // debounce
+    mine.controller = this.me;
+    this.claimedAt.set(this.me, now);
+    this.env.transport.claim(this.me);
   }
 
   private simulate(p: Pet, dt: number, now: number) {
