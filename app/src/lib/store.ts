@@ -1,5 +1,4 @@
 import { load, Store } from "@tauri-apps/plugin-store";
-import type { CharacterId } from "./characters";
 import { type WorldConfig, DEFAULT_CONFIG } from "./world-config";
 
 // Re-exported so existing imports (`from "../lib/store"`) keep working; the actual
@@ -12,7 +11,7 @@ export { type WorldConfig, DEFAULT_CONFIG };
 export interface Profile {
   id: string;
   name: string;
-  character: CharacterId;
+  character: string; // a built-in CharacterId or a custom avatar folder name
   onboarded: boolean;
 }
 

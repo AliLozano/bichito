@@ -1,3 +1,4 @@
+mod avatars;
 mod cursor;
 mod presence;
 mod protocol;
@@ -124,9 +125,16 @@ pub fn run() {
             presence::set_dnd,
             presence::net_ping_start,
             presence::net_ping_stop,
-            presence::update_available
+            presence::set_character,
+            presence::update_available,
+            avatars::list_avatars,
+            avatars::open_avatars_dir
         ])
         .setup(|app| {
+            // First run: create ~/.bichito/avatars/ + SKILL.md + an example pet so
+            // custom avatars are discoverable.
+            avatars::scaffold(app.handle());
+
             // --- Tray icon + context menu -------------------------------------
             let prefs = MenuItem::with_id(app, "prefs", "Preferencias", true, None::<&str>)?;
             let friends =

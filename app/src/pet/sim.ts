@@ -1,4 +1,4 @@
-import { type CharacterId, type Pose } from "../lib/characters";
+import { type Pose } from "../lib/characters";
 import { DEFAULT_CONFIG, type WorldConfig } from "../lib/world-config";
 import type { Env } from "./env";
 
@@ -31,7 +31,7 @@ function randIdle(exclude?: PetState): IdleState {
 export interface Pet {
   owner: string;
   name: string;
-  character: CharacterId;
+  character: string; // built-in CharacterId or a custom avatar name
   controller: string;
   state: PetState;
   x: number;
@@ -123,7 +123,7 @@ function rand(a: number, b: number) {
 export class Sim {
   me = "";
   myName = "";
-  myChar: CharacterId = "gato";
+  myChar: string = "gato";
   pets = new Map<string, Pet>();
   cursors = new Map<string, RemoteCursor>();
   myCursor = { x: 0.5, y: 0.5 };
@@ -219,7 +219,7 @@ export class Sim {
     }
   }
 
-  setMe(id: string, name: string, char: CharacterId) {
+  setMe(id: string, name: string, char: string) {
     this.me = id;
     this.myName = name;
     this.myChar = char;
@@ -229,7 +229,7 @@ export class Sim {
     return {
       owner,
       name,
-      character: character as CharacterId,
+      character,
       controller,
       state: "walk",
       x: 0.5,
@@ -514,8 +514,17 @@ export class Sim {
         }
         const nx = this.myCursor.x + p.offX;
         const ny = this.myCursor.y + p.offY;
-        p.vx = (nx - p.x) / Math.max(dt, 1e-3);
-        p.vy = (ny - p.y) / Math.max(dt, 1e-3);
+        // Throw velocity = a SMOOTHED (EMA) cursor velocity, not just this frame's delta.
+        // Raw last-frame delta is often ~0 at the instant of release (you decelerate the
+        // mouse before letting go, and the Rust cursor poller / rAF loop drift out of
+        // phase so some frames carry no fresh cursor update) — which made the fling drop
+        // straight down as if braked. Smoothing keeps the flick's momentum through a
+        // single dead frame; a genuine still-hold still decays to ~0 (a plain drop).
+        const ivx = (nx - p.x) / Math.max(dt, 1e-3);
+        const ivy = (ny - p.y) / Math.max(dt, 1e-3);
+        const keep = 0.6; // weight on recent history
+        p.vx = p.vx * keep + ivx * (1 - keep);
+        p.vy = p.vy * keep + ivy * (1 - keep);
         p.x = nx;
         p.y = ny;
         break;

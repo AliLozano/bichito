@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Sim, SPRITE_PX } from "./sim";
 import type { Env } from "./env";
+import type { Avatar } from "../lib/avatars";
 import { PetView } from "./PetView";
 import { StatsHud } from "./StatsHud";
 import { GameEngine } from "../game/engine";
@@ -57,10 +58,25 @@ function Overlay() {
   const [, force] = useState(0);
   // local diagnostics (this device only): smoothed render FPS + last measured RTT.
   const stats = useRef({ fps: 0, rtt: -1 });
+  // custom pet skins by owner id, learned from presence (includes my own). Read in
+  // render each frame; a pet with no entry falls back to the built-in critter.
+  const avatars = useRef(new Map<string, Avatar>());
 
   useEffect(() => {
     invoke("set_clickthrough", { ignore: true }).catch(() => {});
     invoke("cursor_poll_start").catch(() => {});
+
+    // Seed MY OWN avatar locally (don't wait for a server presence round-trip — that
+    // delays my pet's skin on every change and never arrives while offline).
+    const seedOwnAvatar = (id: string, character: string) => {
+      invoke<Avatar[]>("list_avatars")
+        .then((list) => {
+          const a = list.find((x) => x.name === character);
+          if (a) avatars.current.set(id, a);
+          else avatars.current.delete(id); // switched back to a built-in
+        })
+        .catch(() => {});
+    };
 
     // Local FPS/latency HUD (toggled in the "Local" settings tab). Turning it on
     // starts the fast latency probe in Rust; off stops it.
@@ -78,6 +94,7 @@ function Overlay() {
     loadProfile().then((p) => {
       setMe(p);
       sim.setMe(p.id, p.name, p.character);
+      seedOwnAvatar(p.id, p.character);
       profileReady = true;
       invoke<any[]>("get_world")
         .then((pets) => sim.onWorld(pets, performance.now()))
@@ -93,8 +110,20 @@ function Overlay() {
       .then((u) => u && invoke("update_available", { version: u.version }).catch(() => {}))
       .catch(() => {});
 
+    // rebuild the avatar cache from a presence list (the full set of online users)
+    const applyPresence = (users: Array<{ id: string; avatar?: Avatar }>) => {
+      const m = avatars.current;
+      m.clear();
+      for (const u of users) if (u?.avatar) m.set(u.id, u.avatar);
+    };
+    // seed from the current online list (in case we missed the first presence event)
+    invoke<Array<{ id: string; avatar?: Avatar }>>("get_online")
+      .then(applyPresence)
+      .catch(() => {});
+
     // --- ingest from the server (via Rust presence events) ------------------
     const subs = [
+      listen<Array<{ id: string; avatar?: Avatar }>>("presence", (e) => applyPresence(e.payload)),
       listen<{ nx: number; ny: number }>("local-cursor", (e) => {
         sim.myCursor.x = e.payload.nx;
         sim.myCursor.y = e.payload.ny;
@@ -125,6 +154,7 @@ function Overlay() {
         const p = e.payload;
         setMe(p);
         sim.setMe(p.id, p.name, p.character);
+        seedOwnAvatar(p.id, p.character); // apply my new skin now, not after a round-trip
         const mine = sim.pets.get(sim.me);
         if (mine) {
           mine.character = p.character;
@@ -283,6 +313,7 @@ function Overlay() {
             flash={game.isStunned(p.owner, performance.now())}
             charge={p.owner === me.id ? game.chargeLevel(performance.now()) : 0}
             duel={duel}
+            avatar={avatars.current.get(p.owner)}
           />
         ));
       })()}

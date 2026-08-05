@@ -2,6 +2,7 @@ import { Character } from "../components/Character";
 import { PetLabel } from "./PetLabel";
 import { GripMeter } from "./GripMeter";
 import { SPRITE_PX, COLLIDE_R, type Pet, type Sim } from "./sim";
+import type { Avatar } from "../lib/avatars";
 
 // Thin renderer: draws one pet from the Sim, converting normalized (0..1) coords
 // to pixels at render time (x * innerWidth). No physics here — the Sim owns state.
@@ -55,6 +56,7 @@ export function PetView({
   flash = false,
   charge = 0,
   duel = false,
+  avatar,
 }: {
   pet: Pet;
   sim: Sim;
@@ -62,6 +64,7 @@ export function PetView({
   flash?: boolean; // just hit in the minigame -> hit flash (game-owned, passed in)
   charge?: number; // 0..1 Nail-Art charge on MY pet -> glow (game-owned)
   duel?: boolean; // ≥2 pets in a match -> show health bars (hidden when playing solo)
+  avatar?: Avatar; // custom user skin for this pet's owner (else built-in critter)
 }) {
   if (pet.state === "gone") return null;
   const px = pet.x * window.innerWidth;
@@ -170,6 +173,7 @@ export function PetView({
         )}
         <Character
           id={pet.character}
+          avatar={avatar}
           pose={pose}
           size={SIZE}
           flip={pet.flip}

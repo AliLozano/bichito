@@ -1,14 +1,27 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // Mirror of server/src/protocol.rs — the shared "pet world". Everything is
 // NORMALIZED (0..1 of the screen). Each pet has a `controller` (the client
 // simulating it) that broadcasts snapshots ~20Hz; viewers dead-reckon between.
+
+/// A user-authored pet skin: one sanitized SVG per clip (idle/walk/coffee/…).
+/// Travels ONCE via presence (not in every snapshot). `clips` maps a clip name
+/// to its SVG source; peers render it as an inert `<img>` so it can't run scripts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Avatar {
+    pub name: String,
+    pub clips: HashMap<String, String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     pub id: String,
     pub name: String,
     pub character: String,
+    /// Present only when the user's active character is a custom avatar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<Avatar>,
 }
 
 /// Shared group "vibe" config (mirror of server). First client seeds it.
@@ -60,6 +73,16 @@ pub enum ClientMsg {
         character: String,
         #[serde(default)]
         config: Option<WorldConfig>,
+        /// This user's active custom avatar (if the chosen character is custom).
+        #[serde(default)]
+        avatar: Option<Avatar>,
+    },
+    /// Change my character (and its avatar) live, without reconnecting — a repeated
+    /// Hello would trip the single-session auto-kick. Server updates my presence.
+    SetAvatar {
+        character: String,
+        #[serde(default)]
+        avatar: Option<Avatar>,
     },
     /// Update the shared group config (re-broadcast to everyone).
     Config { config: WorldConfig },

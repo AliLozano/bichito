@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Notify};
 
 mod protocol;
-use protocol::{ClientMsg, PetSnap, ServerMsg, UserInfo, WorldConfig};
+use protocol::{Avatar, ClientMsg, PetSnap, ServerMsg, UserInfo, WorldConfig};
 
 // unique per-connection token, so a stale session can't tear down a newer one
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -24,6 +24,7 @@ static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 struct Peer {
     name: String,
     character: String,
+    avatar: Option<Avatar>, // custom pet skin, relayed to peers via presence
     tx: mpsc::UnboundedSender<Message>,
     token: u64,          // which connection currently owns this id
     kicked: Arc<Notify>, // notified when a newer connection takes over this id
@@ -133,7 +134,7 @@ fn handle_msg(
     msg: ClientMsg,
 ) {
     match msg {
-        ClientMsg::Hello { id, name, character, config } => {
+        ClientMsg::Hello { id, name, character, config, avatar } => {
             // single session per user id: kick any existing connection for this id so a
             // stale/zombie socket can't linger and fight the new one over the same pet.
             if let Some(old) = state.reg.get(&id) {
@@ -144,6 +145,7 @@ fn handle_msg(
                 Peer {
                     name: name.clone(),
                     character: character.clone(),
+                    avatar,
                     tx: tx.clone(),
                     token,
                     kicked: kicked.clone(),
@@ -182,6 +184,17 @@ fn handle_msg(
             });
             broadcast_presence(&state.reg);
             broadcast_world(state);
+        }
+        ClientMsg::SetAvatar { character, avatar } => {
+            let Some(me) = my_id.clone() else { return };
+            {
+                // scope the RefMut so it's dropped before broadcast_presence iterates reg
+                if let Some(mut peer) = state.reg.get_mut(&me) {
+                    peer.character = character;
+                    peer.avatar = avatar;
+                }
+            }
+            broadcast_presence(&state.reg);
         }
         ClientMsg::Config { config } => {
             *state.config.lock().unwrap() = Some(config.clone());
@@ -268,6 +281,7 @@ fn broadcast_presence(reg: &Registry) {
             id: e.key().clone(),
             name: e.value().name.clone(),
             character: e.value().character.clone(),
+            avatar: e.value().avatar.clone(),
         })
         .collect();
     let f = frame(&ServerMsg::Presence { users });

@@ -1,11 +1,15 @@
-import { getCharacter, type CharacterId, type Pose } from "../lib/characters";
+import { getCharacter, type Pose } from "../lib/characters";
+import { type Avatar, pickClip, svgDataUri } from "../lib/avatars";
 
 // Self-contained placeholder critter (no binary assets) drawn as a clean, outlined
 // little creature so it reads well over ANY wallpaper. Poses nudge legs/arms/body
-// so idle/walk/jump/fall/hang look distinct at ~48-56px. Swap this whole component
-// for an <img> sprite-sheet in Hito 3 without touching callers (same props).
+// so idle/walk/jump/fall/hang look distinct at ~48-56px.
+//
+// If `avatar` (a user-authored skin) is supplied, we render its matching clip as an
+// INERT <img> (data URI) instead — no script execution, safe for peer-supplied art.
 export function Character({
   id,
+  avatar,
   pose = "idle",
   size = 56,
   flip = false,
@@ -13,7 +17,8 @@ export function Character({
   activity,
   combat = false,
 }: {
-  id: CharacterId;
+  id: string;
+  avatar?: Avatar; // custom skin; when present it overrides the built-in critter
   pose?: Pose;
   size?: number;
   flip?: boolean;
@@ -21,6 +26,26 @@ export function Character({
   activity?: string; // idle activity prop drawn into the sprite: coding | coffee | music | thinking
   combat?: boolean; // minigame attack mode: draw the nail (little sword) held out front
 }) {
+  // Custom avatar: render the chosen clip as an inert image (XSS-safe).
+  const clip = avatar ? pickClip(avatar, { pose, activity, combat }) : undefined;
+  if (clip) {
+    const walkBob = pose === "walk" && frame % 2 === 0 ? 0.6 : 0;
+    return (
+      <img
+        src={svgDataUri(clip)}
+        width={size}
+        height={size}
+        draggable={false}
+        alt=""
+        style={{
+          display: "block",
+          pointerEvents: "none",
+          transform: `${flip ? "scaleX(-1)" : ""} translateY(${walkBob}px)`.trim(),
+        }}
+      />
+    );
+  }
+
   const c = getCharacter(id);
   const walking = pose === "walk";
   const step = walking ? (frame % 2 === 0 ? -2 : 2) : 0;

@@ -210,6 +210,14 @@ pub fn get_config(app: AppHandle) -> Option<WorldConfig> {
     app.state::<PresenceState>().config.lock().unwrap().clone()
 }
 
+/// Change my character live and re-announce it (with its custom avatar, if any) to
+/// peers — without reconnecting (a repeated Hello would trip the single-session kick).
+#[tauri::command]
+pub fn set_character(app: AppHandle, character: String) {
+    let avatar = crate::avatars::load_named(&app, &character);
+    send(&app, ClientMsg::SetAvatar { character, avatar });
+}
+
 /// Update the shared group config -> broadcast to everyone (the echo updates us).
 #[tauri::command]
 pub fn net_config(app: AppHandle, config: WorldConfig) {
@@ -279,11 +287,18 @@ async fn run(
                 set_connected(&app, true);
                 let (mut write, mut read) = ws.split();
 
+                // Re-read the profile at connect time so a character change (and its
+                // avatar) is reflected on reconnect, not just the value captured at start.
+                let (cur_name, cur_char) = read_profile(&app)
+                    .map(|(_, n, c)| (n, c))
+                    .unwrap_or_else(|| (name.clone(), character.clone()));
+                let avatar = crate::avatars::load_named(&app, &cur_char);
                 let hello = ClientMsg::Hello {
                     id: id.clone(),
-                    name: name.clone(),
-                    character: character.clone(),
+                    name: cur_name,
+                    character: cur_char,
                     config: read_config(&app), // seeds the shared config if we're first
+                    avatar,
                 };
                 let _ = write
                     .send(Message::Text(serde_json::to_string(&hello).unwrap()))

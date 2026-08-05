@@ -1,4 +1,13 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// A user-authored pet skin: one sanitized SVG per clip. Relayed verbatim to peers
+/// via presence; the server never renders it. Carried once per user, not per snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Avatar {
+    pub name: String,
+    pub clips: HashMap<String, String>,
+}
 
 // Shared "pet world" protocol. Everything is NORMALIZED (0..1 of the screen) so
 // it looks the same on any display. Each pet has a `controller` (the client
@@ -11,6 +20,8 @@ pub struct UserInfo {
     pub id: String,
     pub name: String,
     pub character: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<Avatar>,
 }
 
 /// Shared "vibe" config for the whole friend group. The first client to connect
@@ -69,6 +80,15 @@ pub enum ClientMsg {
         /// this client's local config — seeds the shared one if none exists yet
         #[serde(default)]
         config: Option<WorldConfig>,
+        /// this user's active custom avatar (if any) — relayed to peers via presence
+        #[serde(default)]
+        avatar: Option<Avatar>,
+    },
+    /// Change character (+ avatar) live without reconnecting.
+    SetAvatar {
+        character: String,
+        #[serde(default)]
+        avatar: Option<Avatar>,
     },
     /// Update the shared group config (re-broadcast to everyone).
     Config {
