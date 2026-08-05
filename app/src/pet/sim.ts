@@ -99,6 +99,11 @@ export interface PetController {
 // / leaping). While in one of these, its owner must NOT reclaim it — that's normal social
 // play. Once it settles back to any other state, the owner takes it back (see step()).
 const MANIPULATED = new Set<string>(["held", "oncursor", "leap", "thrown"]);
+// Only take my pet back after it's been controlled by someone else AND at rest for THIS
+// long. The delay is what makes a fresh grab survive: when a friend grabs my pet, the
+// control claim arrives ~a frame before the "held" state, and without this hysteresis my
+// pet would snap home mid-drag (a claim war). A truly stuck handoff easily outlasts it.
+const RECLAIM_AFTER = 1500; // ms
 
 // physics in normalized units (y grows downward). aspect-agnostic on purpose.
 const G = 2.6; // gravity /s^2
@@ -143,6 +148,7 @@ export class Sim {
   myCursor = { x: 0.5, y: 0.5 };
   charging = false; // mouse held down over a pet
   now = 0; // latest loop timestamp (perf-ms), so event handlers can stamp claims
+  private ownStuckSince = 0; // when my pet first looked "stuck" under someone else's control (0 = not)
   // when I last CLAIMED each pet (grab/leap/auto). A fresh claim is protected from the
   // owner's in-flight snapshots for a grace window (see applySnap) so grabbing someone
   // else's pet can't be ripped back by their still-propagating "I own it" snapshots.
@@ -466,11 +472,22 @@ export class Sim {
   // actively being manipulated, so normal grab/throw social play still works.
   private reclaimOwnPet(now: number) {
     const mine = this.pets.get(this.me);
-    if (!mine || mine.controller === this.me || MANIPULATED.has(mine.state)) return;
-    if (now - (this.claimedAt.get(this.me) ?? -Infinity) < 500) return; // debounce
+    // I control it, or a friend is actively handling it (held/on-cursor/mid-throw) ->
+    // not stuck. Reset the timer so a fresh grab (or any active drag) is never reclaimed.
+    if (!mine || mine.controller === this.me || MANIPULATED.has(mine.state)) {
+      this.ownStuckSince = 0;
+      return;
+    }
+    // Someone else controls my pet and it's at rest. Wait out RECLAIM_AFTER before taking
+    // it back, so the brief window at the START of a legit grab (claim arrives a frame
+    // before the "held" state) doesn't trigger a reclaim tug-of-war.
+    if (this.ownStuckSince === 0) this.ownStuckSince = now;
+    if (now - this.ownStuckSince < RECLAIM_AFTER) return;
+    if (now - (this.claimedAt.get(this.me) ?? -Infinity) < 500) return; // debounce claims
     mine.controller = this.me;
     this.claimedAt.set(this.me, now);
     this.env.transport.claim(this.me);
+    this.ownStuckSince = 0;
   }
 
   private simulate(p: Pet, dt: number, now: number) {
