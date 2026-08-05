@@ -109,6 +109,8 @@ ws.on("message", (buf) => {
 });
 
 // --- AI loop: same cadence as the app's rAF (~60fps) --------------------------
+const FIXED_DT = 1 / 60; // fixed-timestep sim, matching the app (deterministic physics)
+let acc = 0;
 let last = performance.now();
 let lastClaim = 0;
 let lastHp = 100;
@@ -117,8 +119,9 @@ let noticeAt = 0; // when the distracted pet reacts and takes control (0 = not y
 
 setInterval(() => {
   const now = performance.now();
-  const dt = Math.min((now - last) / 1000, 0.05);
+  acc += Math.min((now - last) / 1000, 0.25);
   last = now;
+  const dt = FIXED_DT; // AI logic advances one fixed step per tick
 
   const myPet = sim.pets.get(ME.id);
   if (myPet) {
@@ -190,5 +193,12 @@ setInterval(() => {
     }
   }
 
-  sim.step(dt, now);
+  // fixed-timestep sim (matches the app), decoupled from this interval's jitter
+  let steps = 0;
+  while (acc >= FIXED_DT && steps < 5) {
+    sim.step(FIXED_DT, now);
+    acc -= FIXED_DT;
+    steps++;
+  }
+  if (steps === 5) acc = 0;
 }, 1000 / 60);

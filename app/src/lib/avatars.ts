@@ -31,6 +31,17 @@ export function pickClip(
 
 // Inline the SVG as a data URI. <img>-loaded SVGs are inert (no script/foreignObject/
 // external fetch), which is our XSS guarantee for peer-supplied art.
+//
+// MEMOIZED: the overlay re-renders every frame (~60fps), and encodeURIComponent over a
+// multi-KB SVG per pet per frame is wasted CPU. Cache by SVG string (clips are stable),
+// so it runs once per unique clip and returns a STABLE string (React sees an unchanged
+// src -> no <img> churn). Bounded by #avatars × #clips (small).
+const _uriCache = new Map<string, string>();
 export function svgDataUri(svg: string): string {
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  let uri = _uriCache.get(svg);
+  if (uri === undefined) {
+    uri = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+    _uriCache.set(svg, uri);
+  }
+  return uri;
 }

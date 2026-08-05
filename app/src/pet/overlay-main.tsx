@@ -196,20 +196,34 @@ function Overlay() {
     ];
 
     // --- main loop ----------------------------------------------------------
+    // FIXED-TIMESTEP simulation: the physics always advances in FIXED_DT chunks via an
+    // accumulator, decoupled from the (variable) render framerate. Deterministic + no
+    // more big-dt jumps when FPS dips — the base for anything built on top (e.g. bullets).
+    const FIXED_DT = 1 / 60;
+    const MAX_STEPS = 5; // catch-up cap so a stall can't spiral
+    let acc = 0;
     let raf = 0;
     let last = performance.now();
     let clickThrough = true;
 
     const loop = (now: number) => {
       const rawDt = (now - last) / 1000;
-      const dt = Math.min(rawDt, 0.05);
       last = now;
-      // smoothed FPS from the true frame interval (rawDt, before the physics clamp)
+      // smoothed FPS from the true frame interval
       if (rawDt > 0)
         stats.current.fps = stats.current.fps
           ? stats.current.fps * 0.9 + (1 / rawDt) * 0.1
           : 1 / rawDt;
-      if (profileReady) sim.step(dt, now);
+      if (profileReady) {
+        acc += Math.min(rawDt, 0.25); // clamp catch-up after a long stall
+        let steps = 0;
+        while (acc >= FIXED_DT && steps < MAX_STEPS) {
+          sim.step(FIXED_DT, now);
+          acc -= FIXED_DT;
+          steps++;
+        }
+        if (steps === MAX_STEPS) acc = 0; // fell behind -> drop the backlog
+      }
 
       // Capture the mouse only to GRAB a loose pet, or while dragging one. A pet
       // clinging to my cursor (oncursor) is NOT grabbable, so don't capture for it —

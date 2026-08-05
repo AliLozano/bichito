@@ -66,6 +66,17 @@ export interface Pet {
   spd: number;
   lphase: "run" | "climb" | "jump"; // leap approach sub-phase
   wanderNext: number;
+  // interpolation buffer: recent position samples for a pet I DON'T control, used to
+  // render it smoothly ~INTERP_DELAY in the past. Empty for pets I control (real-time).
+  buf: PosSample[];
+}
+
+interface PosSample {
+  t: number; // local receive time (ms)
+  x: number;
+  y: number;
+  flip: boolean;
+  frame: number;
 }
 
 export interface RemoteCursor {
@@ -115,6 +126,12 @@ const SNAP_MS = 45; // normal broadcast interval (~22Hz) — plenty for ambient 
 const SNAP_MS_MATCH = 20; // while a pet is in a match ("play"), broadcast ~50Hz so
 // the fast dueling motion (jump/crouch/dodge) stays crisp for the opponent
 const CURSOR_MS = 45;
+// Entity interpolation: render pets I DON'T control ~INTERP_DELAY in the past, lerping
+// between the two real snapshots that bracket that instant (instead of extrapolating
+// forward and snapping on correction). ~2× a normal snapshot interval so there are
+// almost always two samples to interpolate between. BUF_MS = how much history to keep.
+const INTERP_DELAY = 100; // ms
+const BUF_MS = 1000; // ms of snapshot history per pet
 const DIZZY = 1.4; // dazed pause after landing — a window to grab it before it flees
 const GENTLE_DIST = 0.16; // a released pet that traveled less than this settles to sleep in place (no dizzy/flee)
 const MAX_LIFT_SPRITES = 4; // when leaping is off, a held pet lifted more than this many sprite-heights above the floor auto-drops
@@ -278,6 +295,7 @@ export class Sim {
       spd: 0,
       lphase: "run",
       wanderNext: rand(1, 4),
+      buf: [],
     };
   }
 
@@ -304,16 +322,13 @@ export class Sim {
       const ownerReclaim = s.controller === s.owner && !justGrabbed;
       if (!ownerReclaim) return; // keep my control (fresh grab, or a non-owner's stale snap)
     }
+    const prevController = p.controller;
     p.name = s.name;
     p.character = s.character;
     p.controller = s.controller;
     p.state = s.state;
-    p.x = s.x;
-    p.y = s.y;
     p.vx = s.vx;
     p.vy = s.vy;
-    p.flip = s.flip;
-    p.frame = s.frame;
     p.grip = s.grip;
     const newHealth = s.health ?? 1;
     // health only ever DROPS on damage, so a decrease on the wire IS a real hit landing
@@ -322,6 +337,20 @@ export class Sim {
     p.health = newHealth;
     p.target = s.target;
     p.lastSnap = now;
+    // Position: a pet I control is simulated locally (real-time); a pet someone ELSE
+    // controls is INTERPOLATED from a buffer of recent samples (rendered ~INTERP_DELAY
+    // behind) so it moves smoothly instead of extrapolating forward and snapping on
+    // correction. A control handoff starts a fresh buffer to avoid mixing stale samples.
+    if (p.controller !== prevController) p.buf.length = 0;
+    if (s.controller === this.me) {
+      p.x = s.x;
+      p.y = s.y;
+      p.flip = s.flip;
+      p.frame = s.frame;
+    } else {
+      p.buf.push({ t: now, x: s.x, y: s.y, flip: s.flip, frame: s.frame });
+      while (p.buf.length > 2 && now - p.buf[0].t > BUF_MS) p.buf.shift();
+    }
     // if a pet leapt onto MY cursor, I take control (only I know my cursor)
     if (p.state === "oncursor" && p.target === this.me && p.controller !== this.me) {
       p.controller = this.me;
@@ -454,7 +483,7 @@ export class Sim {
     this.reclaimOwnPet(now);
     for (const p of this.pets.values()) {
       if (p.controller === this.me) this.simulate(p, dt, now);
-      else this.predict(p, dt);
+      else this.interpolate(p, now);
     }
     this.game?.stepWorld(dt, now); // advance minigame entities (nail swings, …)
     this.collide(now, dt);
@@ -777,31 +806,44 @@ export class Sim {
     }
   }
 
-  // dead-reckoning for pets someone else controls
-  private predict(p: Pet, dt: number) {
-    if (p.state === "thrown") {
-      p.vy += G * dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.spin += p.vx * dt * 90;
-    } else if (p.state === "play") {
-      // dead-reckon a player-controlled pet between snapshots (game owns the physics)
-      this.game?.predictPet(p, dt);
-    } else if (
-      p.state === "flee" ||
-      p.state === "walk" ||
-      p.state === "dizzy" ||
-      p.state === "leap" ||
-      (IDLE_STATES as readonly string[]).includes(p.state)
-    ) {
-      p.x += p.vx * dt; // usually 0; snapshots drive position
-      p.frameAcc += dt;
-      if (p.frameAcc > 0.1) {
-        p.frameAcc = 0;
-        p.frame ^= 1;
+  // Entity interpolation for pets someone else controls: render at (now - INTERP_DELAY)
+  // by lerping between the two buffered snapshots that bracket that instant. This is
+  // smooth and never overshoots (we only ever move between positions that really
+  // happened), replacing the old extrapolate-then-snap dead reckoning that rubber-banded.
+  private interpolate(p: Pet, now: number) {
+    const buf = p.buf;
+    if (buf.length === 0) return; // no samples yet — keep whatever we have
+    const renderT = now - INTERP_DELAY;
+    // before our oldest sample (just started / stalled): sit on the oldest.
+    if (buf.length < 2 || renderT <= buf[0].t) {
+      const s = buf[0];
+      p.x = s.x;
+      p.y = s.y;
+      p.flip = s.flip;
+      p.frame = s.frame;
+      return;
+    }
+    // find the pair a..b with a.t <= renderT <= b.t and lerp.
+    for (let i = buf.length - 1; i >= 1; i--) {
+      const a = buf[i - 1];
+      const b = buf[i];
+      if (a.t <= renderT && renderT <= b.t) {
+        const span = b.t - a.t || 1;
+        const u = Math.max(0, Math.min(1, (renderT - a.t) / span));
+        p.x = a.x + (b.x - a.x) * u;
+        p.y = a.y + (b.y - a.y) * u;
+        p.flip = u < 0.5 ? a.flip : b.flip;
+        p.frame = u < 0.5 ? a.frame : b.frame;
+        return;
       }
     }
-    // held/oncursor: position comes from snapshots (follows their cursor)
+    // renderT is newer than our newest sample (buffer starved): hold the newest position
+    // instead of guessing ahead — a brief pause reads far better than a teleport.
+    const last = buf[buf.length - 1];
+    p.x = last.x;
+    p.y = last.y;
+    p.flip = last.flip;
+    p.frame = last.frame;
   }
 
   private collide(now: number, dt: number) {
