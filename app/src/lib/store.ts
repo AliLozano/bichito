@@ -66,11 +66,13 @@ export async function saveConfig(c: WorldConfig): Promise<void> {
 export interface LocalSettings {
   showStats: boolean; // overlay HUD with FPS + latency (RTT) to the server
   volume: number; // 0..1 master volume for minigame SFX
+  autoUpdate: boolean; // check periodically and install new versions in the background
 }
 
 export const DEFAULT_LOCAL: LocalSettings = {
   showStats: false,
   volume: 0.6,
+  autoUpdate: true, // on by default — the pet quietly keeps itself up to date
 };
 
 export async function loadLocal(): Promise<LocalSettings> {

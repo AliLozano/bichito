@@ -12,6 +12,7 @@ import { SlashView } from "../game/SlashView";
 import { setVolume, resumeAudio } from "../game/sound";
 import { CursorGhost } from "./CursorGhost";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import {
   loadProfile,
   loadConfig,
@@ -85,9 +86,13 @@ function Overlay() {
       stats.current.rtt = -1;
       invoke(on ? "net_ping_start" : "net_ping_stop").catch(() => {});
     };
+    // auto-update toggle (Local settings). Kept in a ref-like closure var read by the
+    // periodic update job below; updated live from the local-settings event.
+    let autoUpdate = true;
     loadLocal().then((l) => {
       applyStats(l.showStats);
       setVolume(l.volume);
+      autoUpdate = l.autoUpdate;
     });
 
     let profileReady = false;
@@ -105,10 +110,33 @@ function Overlay() {
     invoke<WorldConfig | null>("get_config")
       .then((c) => c && sim.setConfig(c))
       .catch(() => {});
-    // on startup, tell the tray if there's a newer version to install
-    checkUpdate()
-      .then((u) => u && invoke("update_available", { version: u.version }).catch(() => {}))
-      .catch(() => {});
+    // Background updater: check on startup and every 30 min. Always surface an available
+    // version to the tray + Preferences banner (update_available). If auto-update is on,
+    // download+install silently and relaunch — but only while IDLE (never yank the app
+    // mid-duel / mid-drag); if busy, we just try again on the next tick.
+    let updating = false;
+    const isBusy = () =>
+      game.active ||
+      game.armed ||
+      [...sim.pets.values()].some(
+        (p) => p.controller === sim.me && (p.state === "held" || p.state === "oncursor")
+      );
+    const runUpdateCheck = async () => {
+      if (updating) return;
+      try {
+        const u = await checkUpdate();
+        if (!u) return;
+        invoke("update_available", { version: u.version }).catch(() => {});
+        if (!autoUpdate || isBusy()) return;
+        updating = true;
+        await u.downloadAndInstall();
+        await relaunch();
+      } catch {
+        updating = false; // transient (offline / dev build) — retry next tick
+      }
+    };
+    runUpdateCheck();
+    const updateTimer = setInterval(runUpdateCheck, 30 * 60 * 1000);
 
     // rebuild the avatar cache from a presence list (the full set of online users)
     const applyPresence = (users: Array<{ id: string; avatar?: Avatar }>) => {
@@ -146,6 +174,7 @@ function Overlay() {
       listen<LocalSettings>("local-settings", (e) => {
         applyStats(e.payload.showStats);
         setVolume(e.payload.volume);
+        autoUpdate = e.payload.autoUpdate;
       }),
       listen<{ target: string }>("leap", (e) => sim.leap(e.payload.target)),
       listen<WorldConfig>("config", (e) => sim.setConfig(e.payload)),
@@ -286,6 +315,7 @@ function Overlay() {
 
     return () => {
       cancelAnimationFrame(raf);
+      clearInterval(updateTimer);
       subs.forEach((s) => s.then((f) => f()));
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("mouseup", release);

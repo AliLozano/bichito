@@ -75,6 +75,28 @@ function LocalTab() {
       <div className="text-sm text-white/70">Ajustes solo de esta computadora</div>
       <AutostartToggle />
       <button
+        onClick={() => update({ autoUpdate: !local.autoUpdate })}
+        className="flex items-center justify-between gap-3 w-full text-sm py-1"
+      >
+        <span className="flex flex-col items-start">
+          <span>Actualizaciones automáticas</span>
+          <span className="text-xs text-white/40 text-left">
+            Instala nuevas versiones en segundo plano cuando estás inactivo.
+          </span>
+        </span>
+        <span
+          className={`shrink-0 w-11 h-6 rounded-full relative transition ${
+            local.autoUpdate ? "bg-bichito-accent" : "bg-white/15"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${
+              local.autoUpdate ? "left-[22px]" : "left-0.5"
+            }`}
+          />
+        </span>
+      </button>
+      <button
         onClick={() => update({ showStats: !local.showStats })}
         className="flex items-center justify-between gap-3 w-full text-sm py-1"
       >
