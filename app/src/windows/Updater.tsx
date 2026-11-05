@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 
 // Auto-updater UI: checks the signed manifest on GitHub Releases, and if a newer
 // version exists, offers to download + install it and relaunch.
@@ -10,6 +11,11 @@ export function Updater() {
   const [state, setState] = useState<State>("checking");
   const [update, setUpdate] = useState<Update | null>(null);
   const [err, setErr] = useState("");
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {});
+  }, []);
 
   const doCheck = async () => {
     setState("checking");
@@ -47,7 +53,10 @@ export function Updater() {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between text-sm">
-        <span>Actualizaciones</span>
+        <span className="flex flex-col items-start">
+          <span>Actualizaciones</span>
+          <span className="text-xs text-white/40">Estás en la versión {version || "…"}</span>
+        </span>
         {state === "available" ? (
           <button
             onClick={install}
@@ -70,7 +79,7 @@ export function Updater() {
         {state === "checking" && "Buscando actualizaciones…"}
         {state === "available" && `Nueva versión ${update?.version} disponible 🎉`}
         {state === "downloading" && "Descargando e instalando… (se reiniciará)"}
-        {state === "none" && "Estás en la última versión ✓"}
+        {state === "none" && `Tienes la última versión (${version}) ✓`}
         {state === "error" && `No se pudo verificar: ${err}`}
       </div>
     </div>

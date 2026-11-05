@@ -63,6 +63,8 @@ function Overlay() {
   // custom pet skins by owner id, learned from presence (includes my own). Read in
   // render each frame; a pet with no entry falls back to the built-in critter.
   const avatars = useRef(new Map<string, Avatar>());
+  // TEMP diagnostic: previous x/controller per pet, to log jumps + control handoffs.
+  const dbgPrev = useRef(new Map<string, { x: number; ctl: string }>());
 
   useEffect(() => {
     invoke("set_clickthrough", { ignore: true }).catch(() => {});
@@ -223,6 +225,19 @@ function Overlay() {
           steps++;
         }
         if (steps === MAX_STEPS) acc = 0; // fell behind -> drop the backlog
+      }
+
+      // TEMP diagnostic: log a big position jump or a control handoff for any pet, so we
+      // can catch the "se va al costado / se mueve y regresa" bug from real interaction.
+      // Prints to the `tauri dev` terminal via the dbg command.
+      for (const p of sim.pets.values()) {
+        const pr = dbgPrev.current.get(p.owner);
+        if (pr && (Math.abs(p.x - pr.x) > 0.05 || pr.ctl !== p.controller)) {
+          invoke("dbg", {
+            msg: `[jump] ${p.owner.slice(0, 6)} x ${pr.x.toFixed(3)}->${p.x.toFixed(3)} (Δ${Math.abs(p.x - pr.x).toFixed(3)}) ctl ${pr.ctl.slice(0, 6)}->${p.controller.slice(0, 6)} st=${p.state} buf=${p.buf.length} cur=${sim.myCursor.x.toFixed(3)} mine=${p.owner === sim.me}`,
+          }).catch(() => {});
+        }
+        dbgPrev.current.set(p.owner, { x: p.x, ctl: p.controller });
       }
 
       // Capture the mouse only to GRAB a loose pet, or while dragging one. A pet

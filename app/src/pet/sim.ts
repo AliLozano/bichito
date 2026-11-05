@@ -132,6 +132,10 @@ const CURSOR_MS = 45;
 // almost always two samples to interpolate between. BUF_MS = how much history to keep.
 const INTERP_DELAY = 100; // ms
 const BUF_MS = 1000; // ms of snapshot history per pet
+// A jump between consecutive samples bigger than this can't be real movement (max throw
+// ≈0.07/snapshot) — it's a legitimate TELEPORT (respawn at the opposite edge). Snap to
+// it instead of interpolating across the screen (the "flashazo" bug).
+const TELEPORT_DIST = 0.3;
 const DIZZY = 1.4; // dazed pause after landing — a window to grab it before it flees
 const GENTLE_DIST = 0.16; // a released pet that traveled less than this settles to sleep in place (no dizzy/flee)
 const MAX_LIFT_SPRITES = 4; // when leaping is off, a held pet lifted more than this many sprite-heights above the floor auto-drops
@@ -307,16 +311,18 @@ export class Sim {
       p = this.blank(s.owner, s.name, s.character, s.controller);
       this.pets.set(s.owner, p);
     }
-    // A pet I control is authoritative locally: a delayed snapshot from a former
-    // controller (still in-flight during a handoff) must not clobber it. Control
-    // changes arrive via PeerClaim/onClaim, so once p.controller is me, ignore —
-    // EXCEPT when the pet's own OWNER is driving it (s.controller === s.owner): the
-    // owner reclaiming its own pet is ground truth and must win, otherwise a stale
-    // claim of mine freezes their pet forever (it renders stuck in an idle activity,
-    // no health bar, while it actually fights on their side).
-    // BUT: if I *just* grabbed this pet, my Claim is still propagating; the owner's
-    // in-flight "I own it" snapshots would rip the fresh grab out of my hand (the
-    // intermittent "no puedo levantar la mascota del amigo"). Protect it briefly.
+    // If I'm ACTIVELY MANIPULATING this pet (dragging it / it's clinging to my cursor /
+    // mid throw or leap), I am the authority until I let go — ignore ALL incoming
+    // snapshots so nothing can steal it mid-grab. This is the real fix for "click, it
+    // raises its hands but won't drag and then deactivates": the owner's still-in-flight
+    // "I own it" snapshots used to rip a held pet out of my hand once the brief grab
+    // grace expired. A grab is now sticky until release.
+    if (p.controller === this.me && MANIPULATED.has(p.state)) return;
+    // A pet I control (but am not actively manipulating) is still locally authoritative:
+    // a delayed snapshot from a former controller must not clobber it. Once p.controller
+    // is me, ignore — EXCEPT the pet's own OWNER reclaiming it (s.controller === s.owner)
+    // is ground truth and must win, otherwise a stale claim of mine freezes their pet.
+    // Brief grab-grace still protects a very fresh claim while it propagates.
     if (p.controller === this.me && s.controller !== this.me) {
       const justGrabbed = now - (this.claimedAt.get(s.owner) ?? -Infinity) < 800;
       const ownerReclaim = s.controller === s.owner && !justGrabbed;
@@ -347,7 +353,16 @@ export class Sim {
       p.y = s.y;
       p.flip = s.flip;
       p.frame = s.frame;
+    } else if (s.state === "gone") {
+      // "gone" = OFF THE MAP (not rendered). No continuity: drop the buffer so that when
+      // it respawns it APPEARS fresh at its edge instead of sliding there. (This is the
+      // clean "quitarlo del mapa y volver a aparecer" behavior.)
+      p.buf.length = 0;
     } else {
+      // Safety net for any other discontinuity: a jump too big to be real movement
+      // (max throw ≈0.07/snapshot) snaps instead of lerping across the screen.
+      const last = p.buf[p.buf.length - 1];
+      if (last && Math.hypot(s.x - last.x, s.y - last.y) > TELEPORT_DIST) p.buf.length = 0;
       p.buf.push({ t: now, x: s.x, y: s.y, flip: s.flip, frame: s.frame });
       while (p.buf.length > 2 && now - p.buf[0].t > BUF_MS) p.buf.shift();
     }
